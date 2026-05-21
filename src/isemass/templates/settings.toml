@@ -1,0 +1,25 @@
+[coa]
+# Turns on extra verbose logging for CoA operations.
+verbose = false
+
+# Optional API username. Passwords/tokens are intentionally not stored here.
+# username = "bob-example"
+
+# Input text file containing MAC addresses. CLI equivalent: -i/--input-file.
+# input_file = "macs.txt"
+
+# API host to connect to, typically the MnT node FQDN or IP.
+# host = "ise-mnt.example.com"
+
+# Short ISE node name that processes the CoA request, typically a PSN.
+# node = "ise-psn01"
+
+# Maximum number of concurrent workers for CoA tasks.
+max_workers = 20
+
+# Skip HTTPS certificate validation when set to true.
+insecure = false
+
+[swauth]
+# Turns on extra verbose logging for switch reauthentication operations.
+verbose = false

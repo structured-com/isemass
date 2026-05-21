@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import copy
 import tomllib
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from platformdirs import user_config_dir
 
-from isemass.defaults import DEFAULT_SETTINGS, SETTINGS_TEMPLATE
+from isemass.defaults import DEFAULT_SETTINGS
 
 APP_NAME = "isemass"
 SETTINGS_FILENAME = "settings.toml"
+TEMPLATE_PACKAGE = "isemass.templates"
 
 
 class SettingsError(Exception):
@@ -59,6 +61,11 @@ def load_settings() -> dict[str, dict[str, Any]]:
     return settings
 
 
+def load_settings_template() -> str:
+    """Return the packaged default settings.toml template."""
+    return files(TEMPLATE_PACKAGE).joinpath(SETTINGS_FILENAME).read_text(encoding="utf-8")
+
+
 def write_default_settings(*, force: bool = False) -> tuple[Path, bool]:
     """Write the default settings template.
 
@@ -70,6 +77,5 @@ def write_default_settings(*, force: bool = False) -> tuple[Path, bool]:
     if path.exists() and not force:
         return path, False
 
-    path.write_text(SETTINGS_TEMPLATE, encoding="utf-8")
+    path.write_text(load_settings_template(), encoding="utf-8")
     return path, True
-

@@ -53,6 +53,13 @@ def _coerce_positive_int(value: Any, *, field_name: str) -> int:
     return resolved
 
 
+def _coerce_bool(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    raise click.ClickException(f"{field_name} must be a boolean true or false.")
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=__version__, prog_name="isemass")
 def cli() -> None:
@@ -72,7 +79,7 @@ def init(force: bool) -> None:
     if not wrote_file:
         raise click.ClickException(f"Settings file already exists: {path}. Use --force to overwrite.")
 
-    console.print(f"[green]Created settings file:[/green] {path}")
+    console.print(f"[green]Created settings file:[/green] '{path}'")
 
 
 @cli.command()
@@ -145,7 +152,10 @@ def coa(
         _resolve_option(max_workers, coa_settings.get("max_workers")),
         field_name="max_workers",
     )
-    resolved_insecure = bool(_resolve_option(insecure, coa_settings.get("insecure")))
+    resolved_insecure = _coerce_bool(
+        _resolve_option(insecure, coa_settings.get("insecure")),
+        field_name="insecure",
+    )
 
     console.print("[yellow]CoA operation is not implemented yet.[/yellow]")
     console.print(f"Input file: {resolved_input_file}")
@@ -161,9 +171,8 @@ def swauth() -> None:
     """Mass session reauthentication through switch SSH."""
     settings = _load_settings_for_cli()
     swauth_settings = _section(settings, "swauth")
-    verbose = bool(swauth_settings.get("verbose", False))
+    verbose = _coerce_bool(swauth_settings.get("verbose", False), field_name="verbose")
 
     console.print("[yellow]Switch reauthentication is not implemented yet.[/yellow]")
     console.print(f"Verbose: {verbose}")
     console.print(f"Settings path: {get_settings_path()}")
-

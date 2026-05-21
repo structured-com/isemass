@@ -24,5 +24,12 @@ isemass swauth
 ```
 
 `isemass init` creates `settings.toml` in the operating system's standard user config directory
-for the `isemass` app.
+for the `isemass` app. 
+
+## Input Config
+
+Priority of configuration input is this order:
+1. CLI arguments
+2. settings.toml values
+3. back-end defaults (in defaults.py)
 

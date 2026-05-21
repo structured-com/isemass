@@ -1,0 +1,2 @@
+"""Packaged templates for isemass."""
+

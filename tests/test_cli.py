@@ -42,7 +42,16 @@ def test_init_creates_settings_file(monkeypatch, tmp_path: Path) -> None:
     settings_file = config_dir / "settings.toml"
     assert result.exit_code == 0
     assert settings_file.exists()
-    assert "[coa]" in settings_file.read_text(encoding="utf-8")
+    settings_text = settings_file.read_text(encoding="utf-8")
+    active_settings_lines = [
+        line.strip()
+        for line in settings_text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert "[coa]" in settings_text
+    assert "# Turns on extra verbose logging for CoA operations." in settings_text
+    assert "# username = \"bob-example\"" in settings_text
+    assert "username = \"bob-example\"" not in active_settings_lines
     assert str(settings_file) in result.output.replace("\n", "")
 
 
@@ -117,6 +126,81 @@ insecure = false
     assert "Host: cli-host.example.com" in result.output
     assert "Node: cli-node" in result.output
     assert "Insecure: True" in result.output
+
+
+def test_coa_settings_override_defaults_when_cli_omits_values(monkeypatch, tmp_path: Path) -> None:
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    configured_input = tmp_path / "configured-macs.txt"
+    configured_input.write_text("001122334455\n", encoding="utf-8")
+    (config_dir / "settings.toml").write_text(
+        f"""
+[coa]
+input_file = "{configured_input}"
+username = "config-user"
+host = "config-host.example.com"
+node = "config-node"
+max_workers = 5
+insecure = true
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["coa"])
+
+    assert result.exit_code == 0
+    assert "Max workers: 5" in result.output
+    assert "Insecure: True" in result.output
+
+
+def test_coa_uses_defaults_when_cli_and_settings_omit_optional_values(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("001122334455\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Max workers: 20" in result.output
+    assert "Insecure: False" in result.output
+
+
+def test_coa_rejects_invalid_boolean_setting(monkeypatch, tmp_path: Path) -> None:
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("001122334455\n", encoding="utf-8")
+    (config_dir / "settings.toml").write_text(
+        f"""
+[coa]
+input_file = "{input_file}"
+username = "config-user"
+host = "ise-mnt.example.com"
+node = "ise-psn01"
+insecure = "false"
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["coa"])
+
+    assert result.exit_code != 0
+    assert "insecure must be a boolean true or false" in result.output
 
 
 def test_coa_missing_required_resolved_values_errors(monkeypatch, tmp_path: Path) -> None:

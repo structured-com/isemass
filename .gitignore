@@ -10,4 +10,5 @@ build/
 htmlcov/
 .coverage
 coverage.xml
+old_references/
 
