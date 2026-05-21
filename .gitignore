@@ -12,3 +12,4 @@ htmlcov/
 coverage.xml
 old_references/
 
+test*.txt

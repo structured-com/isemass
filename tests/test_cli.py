@@ -5,12 +5,30 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from isemass.cli import cli
+from isemass.coa import CoaResult, CoaStatus
 
 
 def _patch_config_dir(monkeypatch, path: Path) -> Path:
     config_dir = path / "config"
     monkeypatch.setattr("isemass.config.user_config_dir", lambda app_name: str(config_dir))
     return config_dir
+
+
+def _patch_coa_runner(monkeypatch):
+    calls = []
+
+    def fake_run_coa_requests(**kwargs):
+        calls.append(kwargs)
+        for mac in kwargs["macs"]:
+            yield CoaResult(
+                mac=mac,
+                status=CoaStatus.SUCCEEDED,
+                seconds=0.12,
+                detail="mocked success",
+            )
+
+    monkeypatch.setattr("isemass.cli.coa_ops.run_coa_requests", fake_run_coa_requests)
+    return calls
 
 
 def test_root_help_shows_commands() -> None:
@@ -32,6 +50,7 @@ def test_coa_help_shows_requested_options() -> None:
     assert "--host" in result.output
     assert "-n, --node" in result.output
     assert "-k, --insecure" in result.output
+    assert "-y, --yes" in result.output
 
 
 def test_init_creates_settings_file(monkeypatch, tmp_path: Path) -> None:
@@ -81,12 +100,13 @@ def test_init_force_overwrites_existing_file(monkeypatch, tmp_path: Path) -> Non
 
 
 def test_coa_cli_options_override_settings(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_coa_runner(monkeypatch)
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
     config_dir.mkdir(parents=True)
     configured_input = tmp_path / "configured-macs.txt"
-    configured_input.write_text("001122334455\n", encoding="utf-8")
+    configured_input.write_text("00:11:22:33:44:55\n", encoding="utf-8")
     cli_input = tmp_path / "cli-macs.txt"
-    cli_input.write_text("aabbccddeeff\n", encoding="utf-8")
+    cli_input.write_text("aa:bb:cc:dd:ee:ff\n", encoding="utf-8")
     (config_dir / "settings.toml").write_text(
         f"""
 [coa]
@@ -115,24 +135,33 @@ insecure = false
             "--node",
             "cli-node",
             "--insecure",
+            "--yes",
         ],
+        input="api-password\n",
     )
 
     assert result.exit_code == 0
-    normalized_output = result.output.replace("\n", "")
-    assert f"Input file: {cli_input}" in normalized_output
-    assert "Username: cli-user" in result.output
-    assert "Max workers: 9" in result.output
-    assert "Host: cli-host.example.com" in result.output
-    assert "Node: cli-node" in result.output
-    assert "Insecure: True" in result.output
+    assert calls == [
+        {
+            "macs": ["AA:BB:CC:DD:EE:FF"],
+            "host": "cli-host.example.com",
+            "node": "cli-node",
+            "username": "cli-user",
+            "password": "api-password",
+            "max_workers": 9,
+            "insecure": True,
+        }
+    ]
+    assert "AA:BB:CC:DD:EE:FF" in result.output
+    assert "SUCCEEDED" in result.output
 
 
 def test_coa_settings_override_defaults_when_cli_omits_values(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_coa_runner(monkeypatch)
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
     config_dir.mkdir(parents=True)
     configured_input = tmp_path / "configured-macs.txt"
-    configured_input.write_text("001122334455\n", encoding="utf-8")
+    configured_input.write_text("00:11:22:33:44:55\n", encoding="utf-8")
     (config_dir / "settings.toml").write_text(
         f"""
 [coa]
@@ -146,19 +175,21 @@ insecure = true
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(cli, ["coa"])
+    result = CliRunner().invoke(cli, ["coa", "--yes"], input="api-password\n")
 
     assert result.exit_code == 0
-    assert "Max workers: 5" in result.output
-    assert "Insecure: True" in result.output
+    assert calls[0]["max_workers"] == 5
+    assert calls[0]["insecure"] is True
+    assert calls[0]["macs"] == ["00:11:22:33:44:55"]
 
 
 def test_coa_uses_defaults_when_cli_and_settings_omit_optional_values(
     monkeypatch, tmp_path: Path
 ) -> None:
+    calls = _patch_coa_runner(monkeypatch)
     _patch_config_dir(monkeypatch, tmp_path)
     input_file = tmp_path / "macs.txt"
-    input_file.write_text("001122334455\n", encoding="utf-8")
+    input_file.write_text("00:11:22:33:44:55\n", encoding="utf-8")
 
     result = CliRunner().invoke(
         cli,
@@ -172,19 +203,21 @@ def test_coa_uses_defaults_when_cli_and_settings_omit_optional_values(
             "ise-mnt.example.com",
             "--node",
             "ise-psn01",
+            "--yes",
         ],
+        input="api-password\n",
     )
 
     assert result.exit_code == 0
-    assert "Max workers: 20" in result.output
-    assert "Insecure: False" in result.output
+    assert calls[0]["max_workers"] == 20
+    assert calls[0]["insecure"] is False
 
 
 def test_coa_rejects_invalid_boolean_setting(monkeypatch, tmp_path: Path) -> None:
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
     config_dir.mkdir(parents=True)
     input_file = tmp_path / "macs.txt"
-    input_file.write_text("001122334455\n", encoding="utf-8")
+    input_file.write_text("00:11:22:33:44:55\n", encoding="utf-8")
     (config_dir / "settings.toml").write_text(
         f"""
 [coa]
@@ -203,6 +236,61 @@ insecure = "false"
     assert "insecure must be a boolean true or false" in result.output
 
 
+def test_coa_no_macs_found_aborts_before_api_submission(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_coa_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("no macs here\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+            "--yes",
+        ],
+        input="api-password\n",
+    )
+
+    assert result.exit_code != 0
+    assert "No MAC addresses found" in result.output
+    assert calls == []
+
+
+def test_coa_confirmation_decline_aborts_before_api_submission(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_coa_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("00:11:22:33:44:55\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+        ],
+        input="api-password\nn\n",
+    )
+
+    assert result.exit_code != 0
+    assert "Operation not approved" in result.output
+    assert calls == []
+
+
 def test_coa_missing_required_resolved_values_errors(monkeypatch, tmp_path: Path) -> None:
     _patch_config_dir(monkeypatch, tmp_path)
 
@@ -216,10 +304,11 @@ def test_coa_missing_required_resolved_values_errors(monkeypatch, tmp_path: Path
 
 
 def test_coa_prompts_for_username_when_missing(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_coa_runner(monkeypatch)
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
     config_dir.mkdir(parents=True)
     input_file = tmp_path / "macs.txt"
-    input_file.write_text("001122334455\n", encoding="utf-8")
+    input_file.write_text("00:11:22:33:44:55\n", encoding="utf-8")
     (config_dir / "settings.toml").write_text(
         f"""
 [coa]
@@ -230,8 +319,10 @@ node = "ise-psn01"
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(cli, ["coa"], input="prompt-user\n")
+    result = CliRunner().invoke(cli, ["coa", "--yes"], input="prompt-user\nprompt-pass\n")
 
     assert result.exit_code == 0
     assert "API username:" in result.output
-    assert "Username: prompt-user" in result.output
+    assert "API password for prompt-user:" in result.output
+    assert calls[0]["username"] == "prompt-user"
+    assert calls[0]["password"] == "prompt-pass"

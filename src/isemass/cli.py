@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import click
+from rich.table import Table
 
 from isemass import __version__
+from isemass import coa as coa_ops
 from isemass.config import SettingsError, get_settings_path, load_settings, write_default_settings
 from isemass.console import console
 
@@ -116,6 +118,12 @@ def init(force: bool) -> None:
     default=None,
     help="Skip HTTPS certificate validation.",
 )
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Skip confirmation before submitting CoA requests.",
+)
 def coa(
     input_file: Path | None,
     username: str | None,
@@ -123,6 +131,7 @@ def coa(
     host: str | None,
     node: str | None,
     insecure: bool | None,
+    yes: bool,
 ) -> None:
     """ISE Mass CoA through API."""
     settings = _load_settings_for_cli()
@@ -157,13 +166,26 @@ def coa(
         field_name="insecure",
     )
 
-    console.print("[yellow]CoA operation is not implemented yet.[/yellow]")
-    console.print(f"Input file: {resolved_input_file}")
-    console.print(f"Username: {resolved_username}")
-    console.print(f"Max workers: {resolved_max_workers}")
-    console.print(f"Host: {resolved_host}")
-    console.print(f"Node: {resolved_node}")
-    console.print(f"Insecure: {resolved_insecure}")
+    password = click.prompt(f"API password for {resolved_username}", hide_input=True, type=str)
+    macs = coa_ops.extract_macs_from_file(resolved_input_file)
+    if not macs:
+        raise click.ClickException(f"No MAC addresses found in {resolved_input_file}.")
+
+    _print_mac_preview(macs)
+    if not yes and not click.confirm("Continue with CoA operation?", default=False):
+        raise click.ClickException("Operation not approved. Aborting.")
+
+    console.print(f"[bold]Starting CoA requests for {len(macs)} MAC address(es)...[/bold]")
+    for result in coa_ops.run_coa_requests(
+        macs=macs,
+        host=resolved_host,
+        node=resolved_node,
+        username=str(resolved_username),
+        password=password,
+        max_workers=resolved_max_workers,
+        insecure=resolved_insecure,
+    ):
+        _print_coa_result(result)
 
 
 @cli.command()
@@ -176,3 +198,34 @@ def swauth() -> None:
     console.print("[yellow]Switch reauthentication is not implemented yet.[/yellow]")
     console.print(f"Verbose: {verbose}")
     console.print(f"Settings path: {get_settings_path()}")
+
+
+def _print_mac_preview(macs: list[str]) -> None:
+    table = Table(title=f"Unique MAC addresses ({len(macs)})")
+    table.add_column("#", justify="right")
+    table.add_column("MAC address", style="cyan")
+
+    for index, mac in enumerate(macs, start=1):
+        table.add_row(str(index), mac)
+
+    console.print(table)
+
+
+def _print_coa_result(result: coa_ops.CoaResult) -> None:
+    styles = {
+        coa_ops.CoaStatus.SUCCEEDED: "green",
+        coa_ops.CoaStatus.COA_FAILED: "yellow",
+        coa_ops.CoaStatus.REQUEST_FAILED: "red",
+    }
+    labels = {
+        coa_ops.CoaStatus.SUCCEEDED: "SUCCEEDED",
+        coa_ops.CoaStatus.COA_FAILED: "FAILED/UNDETERMINED",
+        coa_ops.CoaStatus.REQUEST_FAILED: "REQUEST FAILED",
+    }
+    style = styles[result.status]
+    label = labels[result.status]
+
+    console.print(
+        f"{result.mac} | {result.seconds:>5.2f}s | "
+        f"[{style}]{label}[/{style}] | {result.detail}"
+    )

@@ -12,6 +12,7 @@ license = "Apache-2.0"
 dependencies = [
     "click>=8.1",
     "platformdirs>=4.2",
+    "requests>=2.32",
     "rich>=13.7",
 ]
 
@@ -34,4 +35,3 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-
