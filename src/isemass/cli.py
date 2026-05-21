@@ -175,7 +175,7 @@ def coa(
     if not yes and not click.confirm("Continue with CoA operation?", default=False):
         raise click.ClickException("Operation not approved. Aborting.")
 
-    console.print(f"[bold]Starting CoA requests for {len(macs)} MAC address(es)...[/bold]")
+    console.print(f"Starting CoA requests for {len(macs)} MAC address(es)...", highlight=False)
     for result in coa_ops.run_coa_requests(
         macs=macs,
         host=resolved_host,
@@ -226,6 +226,6 @@ def _print_coa_result(result: coa_ops.CoaResult) -> None:
     label = labels[result.status]
 
     console.print(
-        f"{result.mac} | {result.seconds:>5.2f}s | "
-        f"[{style}]{label}[/{style}] | {result.detail}"
+        f"{result.mac} | {result.seconds:>5.2f}s | [{style}]{label}[/{style}] | {result.detail}",
+        highlight=False,
     )

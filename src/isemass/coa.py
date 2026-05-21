@@ -12,6 +12,7 @@ from typing import Any, Callable, Iterable
 from xml.etree import ElementTree
 
 import requests
+import urllib3
 
 HEADERS = {
     "Accept": "application/xml",
@@ -162,6 +163,9 @@ def run_coa_requests(
 ) -> Iterable[CoaResult]:
     """Run CoA requests concurrently and yield results as they complete."""
     verify_tls = not insecure
+    if insecure:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_mac = {
             executor.submit(

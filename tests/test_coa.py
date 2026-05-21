@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import requests
+import urllib3
 
 from isemass.coa import (
     HEADERS,
     REQUEST_TIMEOUT_SECONDS,
+    CoaResult,
     CoaStatus,
     build_coa_url,
     extract_macs,
     perform_coa_request,
+    run_coa_requests,
 )
 
 
@@ -178,3 +181,35 @@ def test_perform_coa_request_classifies_request_exception_as_request_failed() ->
 
     assert result.status == CoaStatus.REQUEST_FAILED
     assert "connection refused" in result.detail
+
+
+def test_run_coa_requests_suppresses_urllib3_warning_when_insecure(monkeypatch) -> None:
+    disabled_warning_categories = []
+
+    def fake_disable_warnings(category):
+        disabled_warning_categories.append(category)
+
+    def fake_perform_coa_request(**kwargs):
+        return CoaResult(
+            mac=kwargs["mac"],
+            status=CoaStatus.SUCCEEDED,
+            seconds=0.0,
+            detail="mocked success",
+        )
+
+    monkeypatch.setattr("isemass.coa.urllib3.disable_warnings", fake_disable_warnings)
+    monkeypatch.setattr("isemass.coa.perform_coa_request", fake_perform_coa_request)
+
+    list(
+        run_coa_requests(
+            macs=["AA:BB:CC:DD:EE:FF"],
+            host="ise-mnt.example.com",
+            node="ise-psn01",
+            username="api-user",
+            password="api-password",
+            max_workers=1,
+            insecure=True,
+        )
+    )
+
+    assert disabled_warning_categories == [urllib3.exceptions.InsecureRequestWarning]
