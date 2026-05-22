@@ -243,14 +243,7 @@ def _print_mac_preview(macs: list[str]) -> None:
 
 
 def _print_coa_result(result: coa_ops.CoaResult) -> None:
-    labels = {
-        coa_ops.CoaStatus.SUCCEEDED: "SUCCEEDED",
-        coa_ops.CoaStatus.COA_FAILED: "FAILED/UNDETERMINED",
-        coa_ops.CoaStatus.REQUEST_FAILED: "REQUEST FAILED",
-    }
-    label = labels[result.status]
-
     console.print(
-        f"{result.mac} | {result.seconds:>5.2f}s | {label} | {result.detail}",
+        f"{result.mac} | {result.seconds:>5.2f}s | {result.success} | {result.result_message}",
         highlight=False,
     )

@@ -6,7 +6,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from isemass.cli import cli
-from isemass.coa import CoaResult, CoaStatus
+from isemass.coa import CoaResult
 
 
 def _patch_config_dir(monkeypatch, path: Path) -> Path:
@@ -23,9 +23,9 @@ def _patch_coa_runner(monkeypatch):
         for mac in kwargs["macs"]:
             yield CoaResult(
                 mac=mac,
-                status=CoaStatus.SUCCEEDED,
+                success=True,
                 seconds=0.12,
-                detail="mocked success",
+                result_message="mocked success",
             )
 
     monkeypatch.setattr("isemass.cli.coa_ops.run_coa_requests", fake_run_coa_requests)
@@ -35,9 +35,9 @@ def _patch_coa_runner(monkeypatch):
 def _detailed_result(
     mac: str,
     *,
-    status: CoaStatus = CoaStatus.SUCCEEDED,
+    success: bool = True,
     seconds: float = 0.12,
-    detail: str = "mocked success",
+    result_message: str = "CoA Succeeded",
     response_status_code: int | None = 200,
     response_text: str | None = "<remoteCoA><results>true</results></remoteCoA>",
     ise_result_value: str | None = "true",
@@ -46,9 +46,9 @@ def _detailed_result(
 ) -> CoaResult:
     return CoaResult(
         mac=mac,
-        status=status,
+        success=success,
         seconds=seconds,
-        detail=detail,
+        result_message=result_message,
         request_url=f"https://ise-mnt.example.com/admin/API/mnt/CoA/Reauth/ise-psn01/{mac}/0",
         verify_tls=False,
         response_status_code=response_status_code,
@@ -195,7 +195,8 @@ insecure = false
         }
     ]
     assert "AA:BB:CC:DD:EE:FF" in result.output
-    assert "SUCCEEDED" in result.output
+    assert "True" in result.output
+    assert "mocked success" in result.output
 
 
 def test_coa_settings_override_defaults_when_cli_omits_values(monkeypatch, tmp_path: Path) -> None:
@@ -510,9 +511,9 @@ def test_coa_output_json_is_detailed_ordered_and_excludes_auth(
     completion_order_results = [
         _detailed_result(
             "00:11:22:33:44:55",
-            status=CoaStatus.REQUEST_FAILED,
+            success=False,
             seconds=0.34,
-            detail="API request failed: timed out",
+            result_message="Undefined failure",
             response_status_code=None,
             response_text=None,
             ise_result_value=None,
@@ -552,8 +553,8 @@ def test_coa_output_json_is_detailed_ordered_and_excludes_auth(
     assert [entry["mac_address"] for entry in data] == input_order
     assert data[0] == {
         "mac_address": "AA:BB:CC:DD:EE:FF",
-        "status": "succeeded",
-        "detail": "mocked success",
+        "success": True,
+        "result_message": "CoA Succeeded",
         "seconds": 0.12,
         "request_method": "GET",
         "request_url": (
@@ -568,11 +569,14 @@ def test_coa_output_json_is_detailed_ordered_and_excludes_auth(
         "error_type": None,
         "error_message": None,
     }
-    assert data[1]["status"] == "request_failed"
+    assert data[1]["success"] is False
+    assert data[1]["result_message"] == "Undefined failure"
     assert data[1]["error_type"] == "Timeout"
     output_text = output_file.read_text(encoding="utf-8")
     assert "api-password" not in output_text
     output_keys = {key.casefold() for entry in data for key in entry}
+    assert "status" not in output_keys
+    assert "detail" not in output_keys
     assert "auth" not in output_keys
     assert "password" not in output_keys
     assert "authorization" not in output_keys

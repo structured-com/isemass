@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from enum import StrEnum
 import json
 from pathlib import Path
 from time import perf_counter
@@ -20,6 +19,7 @@ HEADERS = {
 }
 REQUEST_METHOD = "GET"
 REQUEST_TIMEOUT_SECONDS = 30
+MAC_NOT_VALID_SESSION_TEXT = "No NAS_IP_ADDRESS associated with the calling station id"
 
 # REGEX for all formats of MAC address.
 # "?:" removes groups so re.findall returns complete MAC address strings.
@@ -30,22 +30,14 @@ RE_MAC_ALL = RE_MAC_COLON + r"|" + RE_MAC_DASH + r"|" + RE_MAC_CISCO
 RE_MAC_PATTERN = re.compile(RE_MAC_ALL)
 
 
-class CoaStatus(StrEnum):
-    """Normalized CoA request outcome."""
-
-    REQUEST_FAILED = "request_failed"
-    COA_FAILED = "coa_failed"
-    SUCCEEDED = "succeeded"
-
-
 @dataclass(frozen=True)
 class CoaResult:
     """Result for one MAC address CoA request."""
 
     mac: str
-    status: CoaStatus
+    success: bool
+    result_message: str
     seconds: float
-    detail: str
     request_method: str = REQUEST_METHOD
     request_url: str | None = None
     verify_tls: bool | None = None
@@ -60,8 +52,8 @@ class CoaResult:
         """Return a JSON-safe representation of this result."""
         return {
             "mac_address": self.mac,
-            "status": str(self.status),
-            "detail": self.detail,
+            "success": self.success,
+            "result_message": self.result_message,
             "seconds": self.seconds,
             "request_method": self.request_method,
             "request_url": self.request_url,
@@ -132,12 +124,23 @@ def perform_coa_request(
             auth=(username, password),
             timeout=timeout,
         )
+    except requests.exceptions.SSLError as exc:
+        return CoaResult(
+            mac=mac,
+            success=False,
+            result_message="HTTPS certificate validation failed",
+            seconds=_elapsed_seconds(start),
+            request_url=url,
+            verify_tls=verify_tls,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
     except requests.RequestException as exc:
         return CoaResult(
             mac=mac,
-            status=CoaStatus.REQUEST_FAILED,
+            success=False,
+            result_message="Undefined failure",
             seconds=_elapsed_seconds(start),
-            detail=f"API request failed: {exc}",
             request_url=url,
             verify_tls=verify_tls,
             error_type=type(exc).__name__,
@@ -148,54 +151,18 @@ def perform_coa_request(
     status_code = getattr(response, "status_code", None)
     response_headers = _response_headers(response)
     response_text = getattr(response, "text", None)
-    if status_code is None or not 200 <= status_code < 300:
-        reason = getattr(response, "reason", "")
-        reason_text = f" {reason}" if reason else ""
-        return CoaResult(
-            mac=mac,
-            status=CoaStatus.REQUEST_FAILED,
-            seconds=seconds,
-            detail=f"HTTP {status_code}{reason_text}",
-            request_url=url,
-            verify_tls=verify_tls,
-            response_status_code=status_code,
-            response_headers=response_headers,
-            response_text=response_text,
-        )
-
     result_value = _extract_remote_coa_result(response_text or "")
-    if result_value is None:
-        return CoaResult(
-            mac=mac,
-            status=CoaStatus.COA_FAILED,
-            seconds=seconds,
-            detail="ISE response did not include remoteCoA.results",
-            request_url=url,
-            verify_tls=verify_tls,
-            response_status_code=status_code,
-            response_headers=response_headers,
-            response_text=response_text,
-        )
-
-    if result_value.casefold() == "true":
-        return CoaResult(
-            mac=mac,
-            status=CoaStatus.SUCCEEDED,
-            seconds=seconds,
-            detail="ISE remoteCoA.results=true",
-            request_url=url,
-            verify_tls=verify_tls,
-            response_status_code=status_code,
-            response_headers=response_headers,
-            response_text=response_text,
-            ise_result_value=result_value,
-        )
+    success, result_message = _classify_coa_response(
+        response_status_code=status_code,
+        response_text=response_text,
+        ise_result_value=result_value,
+    )
 
     return CoaResult(
         mac=mac,
-        status=CoaStatus.COA_FAILED,
+        success=success,
+        result_message=result_message,
         seconds=seconds,
-        detail=f"ISE remoteCoA.results={result_value}",
         request_url=url,
         verify_tls=verify_tls,
         response_status_code=status_code,
@@ -241,9 +208,9 @@ def run_coa_requests(
             except Exception as exc:
                 yield CoaResult(
                     mac=mac,
-                    status=CoaStatus.REQUEST_FAILED,
+                    success=False,
+                    result_message="Undefined failure",
                     seconds=0.0,
-                    detail=f"Unexpected worker error: {exc}",
                     request_url=build_coa_url(host=host, node=node, mac=mac),
                     verify_tls=verify_tls,
                     error_type=type(exc).__name__,
@@ -295,6 +262,28 @@ def _response_headers(response: Any) -> dict[str, str] | None:
         return None
 
     return {str(key): str(value) for key, value in dict(headers).items()}
+
+
+def _classify_coa_response(
+    *,
+    response_status_code: int | None,
+    response_text: str | None,
+    ise_result_value: str | None,
+) -> tuple[bool, str]:
+    if response_status_code in (401, 403):
+        return False, "Invalid API credentials"
+
+    if response_text and MAC_NOT_VALID_SESSION_TEXT in response_text:
+        return False, "MAC address not a valid session"
+
+    if ise_result_value is not None:
+        normalized_result = ise_result_value.casefold()
+        if normalized_result == "true":
+            return True, "CoA Succeeded"
+        if normalized_result == "false":
+            return False, "CoA attempted but no response from network device"
+
+    return False, "Undefined failure"
 
 
 def _extract_remote_coa_result(xml_text: str) -> str | None:
