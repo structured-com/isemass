@@ -15,6 +15,9 @@ verbose = false
 # Can be any format, even unclean, as MAC address will be extracted via RegEx patterns
 # input_file = "macs.txt"
 
+# Optional JSON file to write detailed per-MAC CoA results.
+# output_file = "coa-results.json"
+
 # API host to connect to, typically the MnT node FQDN or IP.
 # host = "ise-mnt.example.com"
 

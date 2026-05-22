@@ -43,6 +43,16 @@ def _coerce_input_file(value: Any) -> Path:
     return path
 
 
+def _coerce_optional_output_file(value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+
+    path = Path(value).expanduser()
+    if path.exists() and path.is_dir():
+        raise click.ClickException(f"Output file cannot be a directory: {path}")
+    return path
+
+
 def _coerce_positive_int(value: Any, *, field_name: str) -> int:
     try:
         resolved = int(value)
@@ -119,6 +129,12 @@ def init(force: bool) -> None:
     help="Skip HTTPS certificate validation.",
 )
 @click.option(
+    "-o",
+    "--output-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Optional output JSON file with detailed results.",
+)
+@click.option(
     "-y",
     "--yes",
     is_flag=True,
@@ -131,6 +147,7 @@ def coa(
     host: str | None,
     node: str | None,
     insecure: bool | None,
+    output_file: Path | None,
     yes: bool,
 ) -> None:
     """ISE Mass CoA through API."""
@@ -165,6 +182,9 @@ def coa(
         _resolve_option(insecure, coa_settings.get("insecure")),
         field_name="insecure",
     )
+    resolved_output_file = _coerce_optional_output_file(
+        _resolve_option(output_file, coa_settings.get("output_file"))
+    )
 
     password = click.prompt(f"API password for {resolved_username}", hide_input=True, type=str)
     macs = coa_ops.extract_macs_from_file(resolved_input_file)
@@ -176,6 +196,7 @@ def coa(
         raise click.ClickException("Operation not approved. Aborting.")
 
     console.print(f"Starting CoA requests for {len(macs)} MAC address(es)...", highlight=False)
+    results: list[coa_ops.CoaResult] = []
     for result in coa_ops.run_coa_requests(
         macs=macs,
         host=resolved_host,
@@ -185,7 +206,17 @@ def coa(
         max_workers=resolved_max_workers,
         insecure=resolved_insecure,
     ):
+        results.append(result)
         _print_coa_result(result)
+
+    if resolved_output_file is not None:
+        try:
+            coa_ops.write_results_json(resolved_output_file, results, mac_order=macs)
+        except OSError as exc:
+            raise click.ClickException(
+                f"Unable to write output JSON file {resolved_output_file}: {exc}"
+            ) from exc
+        console.print(f"Wrote CoA results JSON: {resolved_output_file}")
 
 
 @cli.command()
@@ -212,20 +243,14 @@ def _print_mac_preview(macs: list[str]) -> None:
 
 
 def _print_coa_result(result: coa_ops.CoaResult) -> None:
-    styles = {
-        coa_ops.CoaStatus.SUCCEEDED: "green",
-        coa_ops.CoaStatus.COA_FAILED: "yellow",
-        coa_ops.CoaStatus.REQUEST_FAILED: "red",
-    }
     labels = {
         coa_ops.CoaStatus.SUCCEEDED: "SUCCEEDED",
         coa_ops.CoaStatus.COA_FAILED: "FAILED/UNDETERMINED",
         coa_ops.CoaStatus.REQUEST_FAILED: "REQUEST FAILED",
     }
-    style = styles[result.status]
     label = labels[result.status]
 
     console.print(
-        f"{result.mac} | {result.seconds:>5.2f}s | [{style}]{label}[/{style}] | {result.detail}",
+        f"{result.mac} | {result.seconds:>5.2f}s | {label} | {result.detail}",
         highlight=False,
     )

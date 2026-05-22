@@ -11,15 +11,24 @@ from isemass.coa import (
     build_coa_url,
     extract_macs,
     perform_coa_request,
+    results_to_json_data,
     run_coa_requests,
 )
 
 
 class FakeResponse:
-    def __init__(self, *, status_code: int, text: str = "", reason: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        text: str = "",
+        reason: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.text = text
         self.reason = reason
+        self.headers = headers
 
 
 def test_extract_macs_normalizes_deduplicates_and_preserves_order() -> None:
@@ -54,6 +63,7 @@ def test_perform_coa_request_constructs_request_and_returns_success() -> None:
         return FakeResponse(
             status_code=200,
             text="<remoteCoA><results>true</results></remoteCoA>",
+            headers={"Content-Type": "application/xml"},
         )
 
     result = perform_coa_request(
@@ -75,6 +85,14 @@ def test_perform_coa_request_constructs_request_and_returns_success() -> None:
     }
     assert result.status == CoaStatus.SUCCEEDED
     assert result.mac == "AA:BB:CC:DD:EE:FF"
+    assert result.request_url == captured["url"]
+    assert result.verify_tls is False
+    assert result.response_status_code == 200
+    assert result.response_headers == {"Content-Type": "application/xml"}
+    assert result.response_text == "<remoteCoA><results>true</results></remoteCoA>"
+    assert result.ise_result_value == "true"
+    assert result.error_type is None
+    assert result.error_message is None
 
 
 def test_perform_coa_request_classifies_false_result_as_coa_failed() -> None:
@@ -93,6 +111,7 @@ def test_perform_coa_request_classifies_false_result_as_coa_failed() -> None:
 
     assert result.status == CoaStatus.COA_FAILED
     assert "false" in result.detail
+    assert result.ise_result_value == "false"
 
 
 def test_perform_coa_request_classifies_malformed_xml_as_coa_failed() -> None:
@@ -145,6 +164,8 @@ def test_perform_coa_request_classifies_http_error_as_request_failed() -> None:
 
     assert result.status == CoaStatus.REQUEST_FAILED
     assert "HTTP 401 Unauthorized" in result.detail
+    assert result.response_status_code == 401
+    assert result.response_text == "Unauthorized"
 
 
 def test_perform_coa_request_classifies_timeout_as_request_failed() -> None:
@@ -163,6 +184,8 @@ def test_perform_coa_request_classifies_timeout_as_request_failed() -> None:
 
     assert result.status == CoaStatus.REQUEST_FAILED
     assert "timed out" in result.detail
+    assert result.error_type == "Timeout"
+    assert result.error_message == "timed out"
 
 
 def test_perform_coa_request_classifies_request_exception_as_request_failed() -> None:
@@ -181,6 +204,52 @@ def test_perform_coa_request_classifies_request_exception_as_request_failed() ->
 
     assert result.status == CoaStatus.REQUEST_FAILED
     assert "connection refused" in result.detail
+    assert result.error_type == "ConnectionError"
+    assert result.error_message == "connection refused"
+
+
+def test_results_to_json_data_preserves_mac_order_and_serializes_fields() -> None:
+    results = [
+        CoaResult(
+            mac="00:11:22:33:44:55",
+            status=CoaStatus.REQUEST_FAILED,
+            seconds=0.2,
+            detail="HTTP 401 Unauthorized",
+            request_url="https://example.test/second",
+            verify_tls=True,
+            response_status_code=401,
+            response_headers={"Content-Type": "text/plain"},
+            response_text="Unauthorized",
+            error_type=None,
+            error_message=None,
+        ),
+        CoaResult(
+            mac="AA:BB:CC:DD:EE:FF",
+            status=CoaStatus.SUCCEEDED,
+            seconds=0.1,
+            detail="ISE remoteCoA.results=true",
+            request_url="https://example.test/first",
+            verify_tls=False,
+            response_status_code=200,
+            response_headers={"Content-Type": "application/xml"},
+            response_text="<remoteCoA><results>true</results></remoteCoA>",
+            ise_result_value="true",
+        ),
+    ]
+
+    data = results_to_json_data(
+        results,
+        mac_order=["AA:BB:CC:DD:EE:FF", "00:11:22:33:44:55"],
+    )
+
+    assert [entry["mac_address"] for entry in data] == [
+        "AA:BB:CC:DD:EE:FF",
+        "00:11:22:33:44:55",
+    ]
+    assert data[0]["status"] == "succeeded"
+    assert data[0]["request_method"] == "GET"
+    assert data[0]["ise_result_value"] == "true"
+    assert data[1]["response_status_code"] == 401
 
 
 def test_run_coa_requests_suppresses_urllib3_warning_when_insecure(monkeypatch) -> None:

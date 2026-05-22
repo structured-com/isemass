@@ -40,6 +40,7 @@ isemass init
 isemass init
 isemass coa --input-file macs.txt --host ise-mnt.example.com --node ise-psn01
 isemass coa --input-file macs.txt --host ise-mnt.example.com --node ise-psn01 --yes
+isemass coa --input-file macs.txt --host ise-mnt.example.com --node ise-psn01 --output-file coa-results.json
 isemass swauth
 ```
 
@@ -48,6 +49,9 @@ isemass swauth
 colon format, removes duplicates, prompts for the API password, previews the target MAC list, and
 asks for confirmation before sending requests. Use `--insecure` or `insecure = true` only when you
 need to skip HTTPS certificate validation.
+
+Use `-o/--output-file` or `[coa].output_file` to write detailed per-MAC JSON results after all CoA
+requests complete.
 
 ## Configuration Order
 

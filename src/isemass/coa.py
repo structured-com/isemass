@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 from pathlib import Path
 from time import perf_counter
 import re
@@ -17,6 +18,7 @@ import urllib3
 HEADERS = {
     "Accept": "application/xml",
 }
+REQUEST_METHOD = "GET"
 REQUEST_TIMEOUT_SECONDS = 30
 
 # REGEX for all formats of MAC address.
@@ -44,6 +46,33 @@ class CoaResult:
     status: CoaStatus
     seconds: float
     detail: str
+    request_method: str = REQUEST_METHOD
+    request_url: str | None = None
+    verify_tls: bool | None = None
+    response_status_code: int | None = None
+    response_headers: dict[str, str] | None = None
+    response_text: str | None = None
+    ise_result_value: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+
+    def to_json_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe representation of this result."""
+        return {
+            "mac_address": self.mac,
+            "status": str(self.status),
+            "detail": self.detail,
+            "seconds": self.seconds,
+            "request_method": self.request_method,
+            "request_url": self.request_url,
+            "verify_tls": self.verify_tls,
+            "response_status_code": self.response_status_code,
+            "response_headers": self.response_headers,
+            "response_text": self.response_text,
+            "ise_result_value": self.ise_result_value,
+            "error_type": self.error_type,
+            "error_message": self.error_message,
+        }
 
 
 RequestFunc = Callable[..., Any]
@@ -109,13 +138,16 @@ def perform_coa_request(
             status=CoaStatus.REQUEST_FAILED,
             seconds=_elapsed_seconds(start),
             detail=f"API request failed: {exc}",
+            request_url=url,
+            verify_tls=verify_tls,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
         )
-    
-    # TEMP TESTING. MIGHT BE USED FOR VERBOSITY LATER
-    # print(response.status_code, response.headers, response.text)
 
     seconds = _elapsed_seconds(start)
     status_code = getattr(response, "status_code", None)
+    response_headers = _response_headers(response)
+    response_text = getattr(response, "text", None)
     if status_code is None or not 200 <= status_code < 300:
         reason = getattr(response, "reason", "")
         reason_text = f" {reason}" if reason else ""
@@ -124,15 +156,25 @@ def perform_coa_request(
             status=CoaStatus.REQUEST_FAILED,
             seconds=seconds,
             detail=f"HTTP {status_code}{reason_text}",
+            request_url=url,
+            verify_tls=verify_tls,
+            response_status_code=status_code,
+            response_headers=response_headers,
+            response_text=response_text,
         )
 
-    result_value = _extract_remote_coa_result(getattr(response, "text", ""))
+    result_value = _extract_remote_coa_result(response_text or "")
     if result_value is None:
         return CoaResult(
             mac=mac,
             status=CoaStatus.COA_FAILED,
             seconds=seconds,
             detail="ISE response did not include remoteCoA.results",
+            request_url=url,
+            verify_tls=verify_tls,
+            response_status_code=status_code,
+            response_headers=response_headers,
+            response_text=response_text,
         )
 
     if result_value.casefold() == "true":
@@ -141,6 +183,12 @@ def perform_coa_request(
             status=CoaStatus.SUCCEEDED,
             seconds=seconds,
             detail="ISE remoteCoA.results=true",
+            request_url=url,
+            verify_tls=verify_tls,
+            response_status_code=status_code,
+            response_headers=response_headers,
+            response_text=response_text,
+            ise_result_value=result_value,
         )
 
     return CoaResult(
@@ -148,6 +196,12 @@ def perform_coa_request(
         status=CoaStatus.COA_FAILED,
         seconds=seconds,
         detail=f"ISE remoteCoA.results={result_value}",
+        request_url=url,
+        verify_tls=verify_tls,
+        response_status_code=status_code,
+        response_headers=response_headers,
+        response_text=response_text,
+        ise_result_value=result_value,
     )
 
 
@@ -190,11 +244,57 @@ def run_coa_requests(
                     status=CoaStatus.REQUEST_FAILED,
                     seconds=0.0,
                     detail=f"Unexpected worker error: {exc}",
+                    request_url=build_coa_url(host=host, node=node, mac=mac),
+                    verify_tls=verify_tls,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
                 )
+
+
+def results_to_json_data(
+    results: Iterable[CoaResult],
+    *,
+    mac_order: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Serialize results, ordered by the original MAC input order."""
+    result_list = list(results)
+    result_by_mac = {result.mac: result for result in result_list}
+    ordered_results: list[CoaResult] = []
+    seen: set[str] = set()
+
+    for mac in mac_order:
+        result = result_by_mac.get(mac)
+        if result is None:
+            continue
+        ordered_results.append(result)
+        seen.add(mac)
+
+    ordered_results.extend(result for result in result_list if result.mac not in seen)
+    return [result.to_json_dict() for result in ordered_results]
+
+
+def write_results_json(
+    path: Path,
+    results: Iterable[CoaResult],
+    *,
+    mac_order: Iterable[str],
+) -> None:
+    """Write pretty JSON results, creating parent directories as needed."""
+    data = results_to_json_data(results, mac_order=mac_order)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _elapsed_seconds(start: float) -> float:
     return round(perf_counter() - start, 2)
+
+
+def _response_headers(response: Any) -> dict[str, str] | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+
+    return {str(key): str(value) for key, value in dict(headers).items()}
 
 
 def _extract_remote_coa_result(xml_text: str) -> str | None:
