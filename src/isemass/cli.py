@@ -100,34 +100,34 @@ def init(force: bool) -> None:
     "-i",
     "--input-file",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Input text file containing MAC addresses.",
+    help="Input text file containing MAC addresses. Can be any format, even unclean, as MAC address will be extracted via RegEx patterns",
 )
 @click.option(
     "-u",
     "--username",
-    help="API username. Prompts if omitted and not configured.",
+    help="API username. Prompts during runtime if omitted.",
 )
 @click.option(
     "-w",
     "--max-workers",
     type=int,
-    help="Max workers for multitasking at once.",
+    help="Maximum number of concurrent workers for CoA tasks.",
 )
 @click.option(
     "--host",
-    help="FQDN or IP for the API request, typically the MnT node.",
+    help="API host to connect to, typically the MnT node FQDN or IP.",
 )
 @click.option(
     "-n",
     "--node",
-    help="Short ISE node name that processes the CoA request.",
+    help="Short ISE node name that processes the CoA request, typically a PSN.",
 )
 @click.option(
     "-k",
     "--insecure",
     is_flag=True,
     default=None,
-    help="Skip HTTPS certificate validation.",
+    help="Skip HTTPS certificate validation when set",
 )
 @click.option(
     "-o",
