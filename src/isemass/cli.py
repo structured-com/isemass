@@ -240,14 +240,41 @@ def swauth() -> None:
 
 
 def _print_mac_preview(macs: list[str]) -> None:
-    table = Table(title=f"Unique MAC addresses ({len(macs)})")
+    """
+    Print a compact validation preview of unique MAC addresses.
+
+    Shows all MACs for small lists. For large lists, shows only the first 20
+    and last 20, plus a count of how many entries were hidden.
+    """
+    preview_limit = 20
+    total = len(macs)
+
+    table = Table(title=f"Unique MAC addresses ({total})")
     table.add_column("#", justify="right")
     table.add_column("MAC address", style="green")
 
-    for index, mac in enumerate(macs, start=1):
-        table.add_row(str(index), mac)
+    if total <= preview_limit * 2:
+        preview_rows = list(enumerate(macs, start=1))
+        hidden_count = 0
+    else:
+        first_rows = list(enumerate(macs[:preview_limit], start=1))
+        last_start_index = total - preview_limit + 1
+        last_rows = list(enumerate(macs[-preview_limit:], start=last_start_index))
+
+        preview_rows = first_rows + [(None, "...")] + last_rows
+        hidden_count = total - (preview_limit * 2)
+
+    for index, mac in preview_rows:
+        if index is None:
+            table.add_row("...", "[dim]...[/dim]")
+        else:
+            table.add_row(str(index), mac)
 
     console.print(table)
+
+    if hidden_count:
+        console.print(f"[dim]{hidden_count:,} MAC addresses not shown[/dim]")
+
     console.print()
 
 
