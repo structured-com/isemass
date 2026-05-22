@@ -7,6 +7,7 @@ from typing import Any
 
 import click
 from rich.table import Table
+from rich.panel import Panel
 
 from isemass import __version__
 from isemass import coa as coa_ops
@@ -40,6 +41,16 @@ def _coerce_input_file(value: Any) -> Path:
     path = Path(value).expanduser()
     if not path.is_file():
         raise click.ClickException(f"Input file does not exist: {path}")
+    return path
+
+
+def _coerce_optional_output_file(value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+
+    path = Path(value).expanduser()
+    if path.exists() and path.is_dir():
+        raise click.ClickException(f"Output file cannot be a directory: {path}")
     return path
 
 
@@ -119,6 +130,12 @@ def init(force: bool) -> None:
     help="Skip HTTPS certificate validation.",
 )
 @click.option(
+    "-o",
+    "--output-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Optional output JSON file with detailed results.",
+)
+@click.option(
     "-y",
     "--yes",
     is_flag=True,
@@ -131,9 +148,12 @@ def coa(
     host: str | None,
     node: str | None,
     insecure: bool | None,
+    output_file: Path | None,
     yes: bool,
 ) -> None:
     """ISE Mass CoA through API."""
+
+    console.print()
     settings = _load_settings_for_cli()
     coa_settings = _section(settings, "coa")
 
@@ -165,8 +185,13 @@ def coa(
         _resolve_option(insecure, coa_settings.get("insecure")),
         field_name="insecure",
     )
+    resolved_output_file = _coerce_optional_output_file(
+        _resolve_option(output_file, coa_settings.get("output_file"))
+    )
 
     password = click.prompt(f"API password for {resolved_username}", hide_input=True, type=str)
+    console.print()
+
     macs = coa_ops.extract_macs_from_file(resolved_input_file)
     if not macs:
         raise click.ClickException(f"No MAC addresses found in {resolved_input_file}.")
@@ -174,8 +199,11 @@ def coa(
     _print_mac_preview(macs)
     if not yes and not click.confirm("Continue with CoA operation?", default=False):
         raise click.ClickException("Operation not approved. Aborting.")
+    
+    console.print()
+    console.print(Panel.fit(f"Starting CoA requests for {len(macs)} MAC address(es)..."))
 
-    console.print(f"Starting CoA requests for {len(macs)} MAC address(es)...", highlight=False)
+    results: list[coa_ops.CoaResult] = []
     for result in coa_ops.run_coa_requests(
         macs=macs,
         host=resolved_host,
@@ -185,7 +213,18 @@ def coa(
         max_workers=resolved_max_workers,
         insecure=resolved_insecure,
     ):
+        results.append(result)
         _print_coa_result(result)
+    console.print()
+
+    if resolved_output_file is not None:
+        try:
+            coa_ops.write_results_json(resolved_output_file, results, mac_order=macs)
+        except OSError as exc:
+            raise click.ClickException(
+                f"Unable to write output JSON file {resolved_output_file}: {exc}"
+            ) from exc
+        console.print(f"Wrote CoA results JSON: {resolved_output_file}")
 
 
 @cli.command()
@@ -201,31 +240,54 @@ def swauth() -> None:
 
 
 def _print_mac_preview(macs: list[str]) -> None:
-    table = Table(title=f"Unique MAC addresses ({len(macs)})")
-    table.add_column("#", justify="right")
-    table.add_column("MAC address", style="cyan")
+    """
+    Print a compact validation preview of unique MAC addresses.
 
-    for index, mac in enumerate(macs, start=1):
-        table.add_row(str(index), mac)
+    Shows all MACs for small lists. For large lists, shows only the first 20
+    and last 20, plus a count of how many entries were hidden.
+    """
+    preview_limit = 20
+    total = len(macs)
+
+    table = Table(title=f"Unique MAC addresses ({total})")
+    table.add_column("#", justify="right")
+    table.add_column("MAC address", style="green")
+
+    if total <= preview_limit * 2:
+        preview_rows = list(enumerate(macs, start=1))
+        hidden_count = 0
+    else:
+        first_rows = list(enumerate(macs[:preview_limit], start=1))
+        last_start_index = total - preview_limit + 1
+        last_rows = list(enumerate(macs[-preview_limit:], start=last_start_index))
+
+        preview_rows = first_rows + [(None, "...")] + last_rows
+        hidden_count = total - (preview_limit * 2)
+
+    for index, mac in preview_rows:
+        if index is None:
+            table.add_row("...", "[dim]...[/dim]")
+        else:
+            table.add_row(str(index), mac)
 
     console.print(table)
 
+    if hidden_count:
+        console.print(f"[dim]{hidden_count:,} MAC addresses not shown[/dim]")
+
+    console.print()
+
 
 def _print_coa_result(result: coa_ops.CoaResult) -> None:
-    styles = {
-        coa_ops.CoaStatus.SUCCEEDED: "green",
-        coa_ops.CoaStatus.COA_FAILED: "yellow",
-        coa_ops.CoaStatus.REQUEST_FAILED: "red",
-    }
-    labels = {
-        coa_ops.CoaStatus.SUCCEEDED: "SUCCEEDED",
-        coa_ops.CoaStatus.COA_FAILED: "FAILED/UNDETERMINED",
-        coa_ops.CoaStatus.REQUEST_FAILED: "REQUEST FAILED",
-    }
-    style = styles[result.status]
-    label = labels[result.status]
+
+    success_icon = "✅" if result.success else "❌"
 
     console.print(
-        f"{result.mac} | {result.seconds:>5.2f}s | [{style}]{label}[/{style}] | {result.detail}",
+        (
+            f"[green]{result.mac:<17}[/green] | "
+            f"[blue]{result.seconds:>6.2f}s[/blue] | "
+            f"{success_icon:^3} | "
+            f"{result.result_message}"
+        ),
         highlight=False,
     )

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from isemass.cli import cli
-from isemass.coa import CoaResult, CoaStatus
+from isemass.coa import CoaResult
 
 
 def _patch_config_dir(monkeypatch, path: Path) -> Path:
@@ -22,10 +23,49 @@ def _patch_coa_runner(monkeypatch):
         for mac in kwargs["macs"]:
             yield CoaResult(
                 mac=mac,
-                status=CoaStatus.SUCCEEDED,
+                success=True,
                 seconds=0.12,
-                detail="mocked success",
+                result_message="mocked success",
             )
+
+    monkeypatch.setattr("isemass.cli.coa_ops.run_coa_requests", fake_run_coa_requests)
+    return calls
+
+
+def _detailed_result(
+    mac: str,
+    *,
+    success: bool = True,
+    seconds: float = 0.12,
+    result_message: str = "CoA Succeeded",
+    response_status_code: int | None = 200,
+    response_text: str | None = "<remoteCoA><results>true</results></remoteCoA>",
+    ise_result_value: str | None = "true",
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> CoaResult:
+    return CoaResult(
+        mac=mac,
+        success=success,
+        seconds=seconds,
+        result_message=result_message,
+        request_url=f"https://ise-mnt.example.com/admin/API/mnt/CoA/Reauth/ise-psn01/{mac}/0",
+        verify_tls=False,
+        response_status_code=response_status_code,
+        response_headers={"Content-Type": "application/xml"},
+        response_text=response_text,
+        ise_result_value=ise_result_value,
+        error_type=error_type,
+        error_message=error_message,
+    )
+
+
+def _patch_coa_runner_with_results(monkeypatch, results: list[CoaResult]):
+    calls = []
+
+    def fake_run_coa_requests(**kwargs):
+        calls.append(kwargs)
+        yield from results
 
     monkeypatch.setattr("isemass.cli.coa_ops.run_coa_requests", fake_run_coa_requests)
     return calls
@@ -50,6 +90,7 @@ def test_coa_help_shows_requested_options() -> None:
     assert "--host" in result.output
     assert "-n, --node" in result.output
     assert "-k, --insecure" in result.output
+    assert "-o, --output-file" in result.output
     assert "-y, --yes" in result.output
 
 
@@ -68,8 +109,9 @@ def test_init_creates_settings_file(monkeypatch, tmp_path: Path) -> None:
         if line.strip() and not line.lstrip().startswith("#")
     ]
     assert "[coa]" in settings_text
-    assert "# Turns on extra verbose logging for CoA operations." in settings_text
+    assert "# Turns on extra verbose logging (NOT IMPLEMENTED YET)" in settings_text
     assert "# username = \"bob-example\"" in settings_text
+    assert "# output_file = \"coa-results.json\"" in settings_text
     assert "username = \"bob-example\"" not in active_settings_lines
     assert str(settings_file) in result.output.replace("\n", "")
 
@@ -153,7 +195,8 @@ insecure = false
         }
     ]
     assert "AA:BB:CC:DD:EE:FF" in result.output
-    assert "SUCCEEDED" in result.output
+    assert "True" in result.output
+    assert "mocked success" in result.output
 
 
 def test_coa_settings_override_defaults_when_cli_omits_values(monkeypatch, tmp_path: Path) -> None:
@@ -326,3 +369,214 @@ node = "ise-psn01"
     assert "API password for prompt-user:" in result.output
     assert calls[0]["username"] == "prompt-user"
     assert calls[0]["password"] == "prompt-pass"
+
+
+def test_coa_cli_output_file_overrides_settings_output_file(monkeypatch, tmp_path: Path) -> None:
+    _patch_coa_runner_with_results(
+        monkeypatch,
+        [_detailed_result("AA:BB:CC:DD:EE:FF")],
+    )
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("aa:bb:cc:dd:ee:ff\n", encoding="utf-8")
+    settings_output = tmp_path / "settings-output.json"
+    cli_output = tmp_path / "cli-output.json"
+    (config_dir / "settings.toml").write_text(
+        f"""
+[coa]
+input_file = "{input_file}"
+username = "config-user"
+host = "ise-mnt.example.com"
+node = "ise-psn01"
+output_file = "{settings_output}"
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["coa", "--output-file", str(cli_output), "--yes"],
+        input="api-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert cli_output.exists()
+    assert not settings_output.exists()
+
+
+def test_coa_uses_config_output_file_when_cli_omits_it(monkeypatch, tmp_path: Path) -> None:
+    _patch_coa_runner_with_results(
+        monkeypatch,
+        [_detailed_result("AA:BB:CC:DD:EE:FF")],
+    )
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("aa:bb:cc:dd:ee:ff\n", encoding="utf-8")
+    settings_output = tmp_path / "settings-output.json"
+    (config_dir / "settings.toml").write_text(
+        f"""
+[coa]
+input_file = "{input_file}"
+username = "config-user"
+host = "ise-mnt.example.com"
+node = "ise-psn01"
+output_file = "{settings_output}"
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["coa", "--yes"], input="api-password\n")
+
+    assert result.exit_code == 0
+    assert settings_output.exists()
+
+
+def test_coa_does_not_write_output_file_when_unset(monkeypatch, tmp_path: Path) -> None:
+    _patch_coa_runner_with_results(
+        monkeypatch,
+        [_detailed_result("AA:BB:CC:DD:EE:FF")],
+    )
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("aa:bb:cc:dd:ee:ff\n", encoding="utf-8")
+    unused_output = tmp_path / "unused-output.json"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+            "--yes",
+        ],
+        input="api-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert not unused_output.exists()
+
+
+def test_coa_output_file_creates_parents_and_overwrites_existing_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _patch_coa_runner_with_results(
+        monkeypatch,
+        [_detailed_result("AA:BB:CC:DD:EE:FF")],
+    )
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("aa:bb:cc:dd:ee:ff\n", encoding="utf-8")
+    output_file = tmp_path / "reports" / "coa-results.json"
+    output_file.parent.mkdir()
+    output_file.write_text("old contents\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+            "--output-file",
+            str(output_file),
+            "--yes",
+        ],
+        input="api-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert output_file.read_text(encoding="utf-8") != "old contents\n"
+    assert json.loads(output_file.read_text(encoding="utf-8"))[0]["mac_address"] == (
+        "AA:BB:CC:DD:EE:FF"
+    )
+
+
+def test_coa_output_json_is_detailed_ordered_and_excludes_auth(
+    monkeypatch, tmp_path: Path
+) -> None:
+    input_order = ["AA:BB:CC:DD:EE:FF", "00:11:22:33:44:55"]
+    completion_order_results = [
+        _detailed_result(
+            "00:11:22:33:44:55",
+            success=False,
+            seconds=0.34,
+            result_message="Undefined failure",
+            response_status_code=None,
+            response_text=None,
+            ise_result_value=None,
+            error_type="Timeout",
+            error_message="timed out",
+        ),
+        _detailed_result("AA:BB:CC:DD:EE:FF"),
+    ]
+    _patch_coa_runner_with_results(monkeypatch, completion_order_results)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("\n".join(input_order) + "\n", encoding="utf-8")
+    output_file = tmp_path / "reports" / "coa-results.json"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+            "--insecure",
+            "--output-file",
+            str(output_file),
+            "--yes",
+        ],
+        input="api-password\n",
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(output_file.read_text(encoding="utf-8"))
+    assert [entry["mac_address"] for entry in data] == input_order
+    assert data[0] == {
+        "mac_address": "AA:BB:CC:DD:EE:FF",
+        "success": True,
+        "result_message": "CoA Succeeded",
+        "seconds": 0.12,
+        "request_method": "GET",
+        "request_url": (
+            "https://ise-mnt.example.com/admin/API/mnt/CoA/Reauth/"
+            "ise-psn01/AA:BB:CC:DD:EE:FF/0"
+        ),
+        "verify_tls": False,
+        "response_status_code": 200,
+        "response_headers": {"Content-Type": "application/xml"},
+        "response_text": "<remoteCoA><results>true</results></remoteCoA>",
+        "ise_result_value": "true",
+        "error_type": None,
+        "error_message": None,
+    }
+    assert data[1]["success"] is False
+    assert data[1]["result_message"] == "Undefined failure"
+    assert data[1]["error_type"] == "Timeout"
+    output_text = output_file.read_text(encoding="utf-8")
+    assert "api-password" not in output_text
+    output_keys = {key.casefold() for entry in data for key in entry}
+    assert "status" not in output_keys
+    assert "detail" not in output_keys
+    assert "auth" not in output_keys
+    assert "password" not in output_keys
+    assert "authorization" not in output_keys
