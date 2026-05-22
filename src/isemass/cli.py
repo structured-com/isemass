@@ -7,6 +7,7 @@ from typing import Any
 
 import click
 from rich.table import Table
+from rich.panel import Panel
 
 from isemass import __version__
 from isemass import coa as coa_ops
@@ -151,6 +152,8 @@ def coa(
     yes: bool,
 ) -> None:
     """ISE Mass CoA through API."""
+
+    console.print()
     settings = _load_settings_for_cli()
     coa_settings = _section(settings, "coa")
 
@@ -187,6 +190,8 @@ def coa(
     )
 
     password = click.prompt(f"API password for {resolved_username}", hide_input=True, type=str)
+    console.print()
+
     macs = coa_ops.extract_macs_from_file(resolved_input_file)
     if not macs:
         raise click.ClickException(f"No MAC addresses found in {resolved_input_file}.")
@@ -194,8 +199,10 @@ def coa(
     _print_mac_preview(macs)
     if not yes and not click.confirm("Continue with CoA operation?", default=False):
         raise click.ClickException("Operation not approved. Aborting.")
+    
+    console.print()
+    console.print(Panel.fit(f"Starting CoA requests for {len(macs)} MAC address(es)..."))
 
-    console.print(f"Starting CoA requests for {len(macs)} MAC address(es)...", highlight=False)
     results: list[coa_ops.CoaResult] = []
     for result in coa_ops.run_coa_requests(
         macs=macs,
@@ -208,6 +215,7 @@ def coa(
     ):
         results.append(result)
         _print_coa_result(result)
+    console.print()
 
     if resolved_output_file is not None:
         try:
@@ -234,16 +242,25 @@ def swauth() -> None:
 def _print_mac_preview(macs: list[str]) -> None:
     table = Table(title=f"Unique MAC addresses ({len(macs)})")
     table.add_column("#", justify="right")
-    table.add_column("MAC address", style="cyan")
+    table.add_column("MAC address", style="green")
 
     for index, mac in enumerate(macs, start=1):
         table.add_row(str(index), mac)
 
     console.print(table)
+    console.print()
 
 
 def _print_coa_result(result: coa_ops.CoaResult) -> None:
+
+    success_icon = "✅" if result.success else "❌"
+
     console.print(
-        f"{result.mac} | {result.seconds:>5.2f}s | {result.success} | {result.result_message}",
+        (
+            f"[green]{result.mac:<17}[/green] | "
+            f"[blue]{result.seconds:>6.2f}s[/blue] | "
+            f"{success_icon:^3} | "
+            f"{result.result_message}"
+        ),
         highlight=False,
     )
