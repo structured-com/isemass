@@ -54,5 +54,9 @@ Notable mandatory fields are:
 - `host`: The main URL host to perform the Monitoring API. This is typically the MnT node. Use FQDN or IP.
 - `node`: The PSN node to run the CoA from. This can be any PSN node in the environment. Use short node name only (not FQDN or IP)
 
+Also: to perform operations using the Monitoring APIs, the users must be assigned to one of the following Admin Groups and must be authenticated against the credentials stored in the Cisco ISE internal database (internal admin users):
+- Super Admin
+- System Admin
+- MnT Admin
 
 
