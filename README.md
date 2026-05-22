@@ -3,13 +3,14 @@
 `isemass` is a Python CLI for mass operations related to Cisco ISE.
 
 Current routines include:
-- **coa**: CoA (Change-of-Authority) for multiple MAC address from an input text file, using Cisco ISE Monitoring Open API
-- **swauth**: Reauthenticate ISE sessions from NAD's directly (WIP)
+- **coa**: Perform CoA (Change-of-Authority) for multiple MAC addresses from an input text file, using Cisco ISE Monitoring Open API
+- **swauth**: Reauthenticate ISE sessions from NAD's directly (NOT IMPLEMENTED YET)
 
 
 ## Requirements
 
 This should work on Windows, MacOS, and Linux.
+
 
 ## How to Install
 
@@ -29,33 +30,33 @@ isemass init
 (This is optional, as the tool will run with all CLI arguments, if you prefer)
 
 
-## How to Use (coa) (TODO)
-
-
-
-
-## Commands (TODO)
-
-```bash
-isemass init
-isemass coa --input-file macs.txt --host ise-mnt.example.com --node ise-psn01
-isemass coa --input-file macs.txt --host ise-mnt.example.com --node ise-psn01 --yes
-isemass coa --input-file macs.txt --host ise-mnt.example.com --node ise-psn01 --output-file coa-results.json
-isemass swauth
-```
-
-
-`isemass coa` accepts colon, dash, and Cisco dotted MAC formats, normalizes them to uppercase
-colon format, removes duplicates, prompts for the API password, previews the target MAC list, and
-asks for confirmation before sending requests. Use `--insecure` or `insecure = true` only when you
-need to skip HTTPS certificate validation.
-
-Use `-o/--output-file` or `[coa].output_file` to write detailed per-MAC JSON results after all CoA
-requests complete.
-
 ## Configuration Order
 
 The tool with take priority of configuration inputs is this order:
 1. CLI arguments
 2. `settings.toml` values (if set)
 3. Backend defaults (set in `defaults.py`)
+
+
+## How to Use (coa)
+
+First, you can see help for all options:
+```
+isemass coa --help
+```
+
+Here is a typical example of using the CoA routine:
+```
+isemass coa --input-file macs.txt --host ise-mnt.example.com --node ise-psn01
+```
+Notable mandatory fields are:
+- `input-file`: This input file contains MAC address in any cleaned or uncleaned text format. The tool will parse and find all MAC addresses automatically.
+- `host`: The main URL host to perform the Monitoring API. This is typically the MnT node. Use FQDN or IP.
+- `node`: The PSN node to run the CoA from. This can be any PSN node in the environment. Use short node name only (not FQDN or IP)
+
+Also: to perform operations using the Monitoring APIs, the users must be assigned to one of the following Admin Groups and must be authenticated against the credentials stored in the Cisco ISE internal database (internal admin users):
+- Super Admin
+- System Admin
+- MnT Admin
+
+

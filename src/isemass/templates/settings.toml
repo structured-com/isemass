@@ -8,7 +8,7 @@
 # Turns on extra verbose logging (NOT IMPLEMENTED YET)
 verbose = false
 
-# API username
+# API username. Prompts during runtime if omitted.
 # username = "bob-example"
 
 # Input text file containing MAC addresses
@@ -27,7 +27,7 @@ verbose = false
 # Maximum number of concurrent workers for CoA tasks.
 max_workers = 20
 
-# Skip HTTPS certificate validation when set to true.
+# Skip HTTPS certificate validation when set.
 insecure = false
 
 [swauth]
