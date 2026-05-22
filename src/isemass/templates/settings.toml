@@ -1,11 +1,18 @@
-[coa]
-# Turns on extra verbose logging for CoA operations.
+
+
+############################################################
+# Change-of-Authority as run through ISE's Monitoring API
+############################################################
+[coa] 
+
+# Turns on extra verbose logging (NOT IMPLEMENTED YET)
 verbose = false
 
-# Optional API username. Passwords/tokens are intentionally not stored here.
+# API username
 # username = "bob-example"
 
-# Input text file containing MAC addresses. CLI equivalent: -i/--input-file.
+# Input text file containing MAC addresses
+# Can be any format, even unclean, as MAC address will be extracted via RegEx patterns
 # input_file = "macs.txt"
 
 # API host to connect to, typically the MnT node FQDN or IP.
@@ -21,5 +28,5 @@ max_workers = 20
 insecure = false
 
 [swauth]
-# Turns on extra verbose logging for switch reauthentication operations.
+# Turns on extra verbose logging (NOT IMPLEMENTED YET)
 verbose = false
