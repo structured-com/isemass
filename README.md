@@ -38,7 +38,7 @@ The tool with take priority of configuration inputs is this order:
 3. Backend defaults (set in `defaults.py`)
 
 
-## How to Use (coa) (TODO)
+## How to Use (coa)
 
 First, you can see help for all options:
 ```
