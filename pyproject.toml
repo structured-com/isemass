@@ -4,10 +4,14 @@ build-backend = "uv_build"
 
 [project]
 name = "isemass"
-version = "0.2.0"
+version = "0.3.0dev0"
 description = "Mass-change operations (like CoA) for Cisco ISE or ISE-related NAD's"
 readme = "README.md"
 requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+]
 license = "Apache-2.0"
 dependencies = [
     "click>=8.1",
@@ -16,6 +20,10 @@ dependencies = [
     "rich>=13.7",
     "urllib3>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/structured-com/isemass"
+Issues = "https://github.com/structured-com/isemass/issues"
 
 [project.scripts]
 isemass = "isemass.cli:cli"
