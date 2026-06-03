@@ -26,6 +26,22 @@ class SwauthCsvError(Exception):
     """Raised when the swauth CSV cannot produce runnable input."""
 
 
+class SwauthCredentialValidationError(Exception):
+    """Raised when the switch SSH credential preflight cannot connect."""
+
+    def __init__(self, *, switch_address: str, error: Exception) -> None:
+        self.switch_address = switch_address
+        self.error = error
+        super().__init__(
+            (
+                f"Switch credential preflight failed for first switch '{switch_address}': "
+                f"{type(error).__name__}: {error}. "
+                "Please validate user/pass combination is correct. "
+                "Validate the first switch hostname/ip in the input CSV is valid."
+            )
+        )
+
+
 @dataclass(frozen=True)
 class SwauthInputWarning:
     """Warning for a skipped CSV row."""
@@ -119,6 +135,41 @@ def load_switch_mac_groups(path: Path) -> SwauthInputData:
     return SwauthInputData(switch_macs=switch_macs, warnings=warnings)
 
 
+def first_switch_address(switch_macs: Mapping[str, Sequence[str]]) -> str:
+    """Return the first switch from cleaned switch/MAC input."""
+    try:
+        return next(iter(switch_macs))
+    except StopIteration as exc:
+        raise SwauthCsvError("No valid switch/MAC rows available for credential validation.") from exc
+
+
+def validate_swauth_credentials(
+    *,
+    switch_address: str,
+    username: str,
+    password: str,
+    ssh_config_file: Path,
+    connect_handler: ConnectHandlerFunc | None = None,
+) -> None:
+    """Validate switch SSH credentials by opening and closing one connection."""
+    resolved_connect_handler = connect_handler or _default_connect_handler
+
+    try:
+        connection = resolved_connect_handler(
+            device_type=DEVICE_TYPE,
+            host=switch_address,
+            username=username,
+            password=password,
+            ssh_config_file=str(ssh_config_file),
+        )
+    except Exception as exc:
+        raise SwauthCredentialValidationError(switch_address=switch_address, error=exc) from exc
+
+    disconnect = getattr(connection, "disconnect", None)
+    if callable(disconnect):
+        disconnect()
+
+
 def process_switch(
     *,
     switch_address: str,
@@ -170,6 +221,7 @@ def run_swauth_requests(
     max_workers: int,
     ssh_config_file: Path,
     connect_handler: ConnectHandlerFunc | None = None,
+    on_switch_complete: Callable[[str], None] | None = None,
 ) -> Iterable[SwauthResult]:
     """Run switch reauthentication tasks concurrently and yield results as switches finish."""
     switch_items = [(switch_address, list(macs)) for switch_address, macs in switch_macs.items()]
@@ -191,16 +243,24 @@ def run_swauth_requests(
         for future in as_completed(future_to_switch):
             switch_address, macs = future_to_switch[future]
             try:
-                yield from future.result()
+                results = future.result()
             except Exception as exc:
-                for mac in macs:
-                    yield _failed_result(
+                results = [
+                    _failed_result(
                         switch_address=switch_address,
                         mac=mac,
                         result_message="Undefined failure",
                         seconds=0.0,
                         error=exc,
                     )
+                    for mac in macs
+                ]
+
+            for result in results:
+                yield result
+
+            if on_switch_complete is not None:
+                on_switch_complete(switch_address)
 
 
 def _process_mac(connection: Any, *, switch_address: str, mac: str) -> SwauthResult:

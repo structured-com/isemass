@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+import tomllib
 from typing import Any
 
 import click
-from rich.table import Table
 from rich.panel import Panel
+from rich.progress import Progress
+from rich.table import Table
 
-from isemass import __version__
 from isemass import coa as coa_ops
 from isemass import swauth as swauth_ops
 from isemass.config import (
@@ -79,8 +81,27 @@ def _coerce_bool(value: Any, *, field_name: str) -> bool:
     raise click.ClickException(f"{field_name} must be a boolean true or false.")
 
 
+def _package_version() -> str:
+    try:
+        return version("isemass")
+    except PackageNotFoundError:
+        return _version_from_pyproject()
+
+
+def _version_from_pyproject() -> str:
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    try:
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        project = pyproject.get("project", {})
+        project_version = project.get("version")
+    except (OSError, tomllib.TOMLDecodeError):
+        return "unknown"
+
+    return str(project_version or "unknown")
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option(version=__version__, prog_name="isemass")
+@click.version_option(version=_package_version(), prog_name="isemass")
 def cli() -> None:
     """Mass Cisco ISE related operations."""
 
@@ -212,22 +233,46 @@ def coa(
     _print_mac_preview(macs)
     if not yes and not click.confirm("Continue with CoA operation?", default=False):
         raise click.ClickException("Operation not approved. Aborting.")
-    
+
+    console.print()
+    console.print(
+        (
+            "[cyan]Validating CoA API credentials[/cyan] "
+            f"against host '{resolved_host}', node '{resolved_node}', "
+            f"test MAC {coa_ops.PREFLIGHT_MAC}..."
+        ),
+        highlight=False,
+    )
+    try:
+        coa_ops.validate_coa_credentials(
+            host=resolved_host,
+            node=resolved_node,
+            username=str(resolved_username),
+            password=password,
+            insecure=resolved_insecure,
+        )
+    except coa_ops.CoaCredentialValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print("[green]CoA credential preflight passed.[/green]")
+
     console.print()
     console.print(Panel.fit(f"Starting CoA requests for {len(macs)} MAC address(es)..."))
 
     results: list[coa_ops.CoaResult] = []
-    for result in coa_ops.run_coa_requests(
-        macs=macs,
-        host=resolved_host,
-        node=resolved_node,
-        username=str(resolved_username),
-        password=password,
-        max_workers=resolved_max_workers,
-        insecure=resolved_insecure,
-    ):
-        results.append(result)
-        _print_coa_result(result)
+    with Progress(console=console) as progress:
+        task = progress.add_task("Performing CoA requests...", total=len(macs))
+        for result in coa_ops.run_coa_requests(
+            macs=macs,
+            host=resolved_host,
+            node=resolved_node,
+            username=str(resolved_username),
+            password=password,
+            max_workers=resolved_max_workers,
+            insecure=resolved_insecure,
+        ):
+            results.append(result)
+            _print_coa_result(result)
+            progress.advance(task)
     console.print()
 
     if resolved_output_file is not None:
@@ -299,6 +344,28 @@ def swauth(
         raise click.ClickException(str(exc)) from exc
 
     _print_swauth_warnings(input_data.warnings)
+    ssh_config_file = get_ssh_config_path()
+    first_switch = swauth_ops.first_switch_address(input_data.switch_macs)
+
+    console.print()
+    console.print(
+        (
+            "[cyan]Validating switch SSH credentials[/cyan] "
+            f"against first cleaned switch '{first_switch}'..."
+        ),
+        highlight=False,
+    )
+    try:
+        swauth_ops.validate_swauth_credentials(
+            switch_address=first_switch,
+            username=str(resolved_username),
+            password=password,
+            ssh_config_file=ssh_config_file,
+        )
+    except swauth_ops.SwauthCredentialValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print("[green]Switch credential preflight passed.[/green]")
+
     console.print()
     console.print(
         Panel.fit(
@@ -309,14 +376,21 @@ def swauth(
         )
     )
 
-    for result in swauth_ops.run_swauth_requests(
-        switch_macs=input_data.switch_macs,
-        username=str(resolved_username),
-        password=password,
-        max_workers=resolved_max_workers,
-        ssh_config_file=get_ssh_config_path(),
-    ):
-        _print_swauth_result(result)
+    with Progress(console=console) as progress:
+        task = progress.add_task("Processing switch workers...", total=input_data.switch_count)
+
+        def advance_switch_progress(_switch_address: str) -> None:
+            progress.advance(task)
+
+        for result in swauth_ops.run_swauth_requests(
+            switch_macs=input_data.switch_macs,
+            username=str(resolved_username),
+            password=password,
+            max_workers=resolved_max_workers,
+            ssh_config_file=ssh_config_file,
+            on_switch_complete=advance_switch_progress,
+        ):
+            _print_swauth_result(result)
     console.print()
 
 

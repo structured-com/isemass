@@ -6,8 +6,8 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from isemass.cli import cli
-from isemass.coa import CoaResult
-from isemass.swauth import SwauthResult
+from isemass.coa import CoaCredentialValidationError, CoaResult
+from isemass.swauth import SwauthCredentialValidationError, SwauthResult
 
 
 def _patch_config_dir(monkeypatch, path: Path) -> Path:
@@ -17,6 +17,7 @@ def _patch_config_dir(monkeypatch, path: Path) -> Path:
 
 
 def _patch_coa_runner(monkeypatch):
+    _patch_coa_preflight(monkeypatch)
     calls = []
 
     def fake_run_coa_requests(**kwargs):
@@ -33,10 +34,28 @@ def _patch_coa_runner(monkeypatch):
     return calls
 
 
+def _patch_coa_preflight(monkeypatch):
+    calls = []
+
+    def fake_validate_coa_credentials(**kwargs):
+        calls.append(kwargs)
+        return CoaResult(
+            mac="02:00:00:00:00:00",
+            success=False,
+            seconds=0.12,
+            result_message="MAC address not a valid session",
+        )
+
+    monkeypatch.setattr("isemass.cli.coa_ops.validate_coa_credentials", fake_validate_coa_credentials)
+    return calls
+
+
 def _patch_swauth_runner(monkeypatch):
+    _patch_swauth_preflight(monkeypatch)
     calls = []
 
     def fake_run_swauth_requests(**kwargs):
+        callback = kwargs.pop("on_switch_complete", None)
         calls.append(kwargs)
         for switch_address, macs in kwargs["switch_macs"].items():
             for mac in macs:
@@ -49,8 +68,23 @@ def _patch_swauth_runner(monkeypatch):
                     show_command=f"show authentication sessions mac {mac} detail",
                     clear_command=f"clear authentication sessions mac {mac}",
                 )
+            if callback is not None:
+                callback(switch_address)
 
     monkeypatch.setattr("isemass.cli.swauth_ops.run_swauth_requests", fake_run_swauth_requests)
+    return calls
+
+
+def _patch_swauth_preflight(monkeypatch):
+    calls = []
+
+    def fake_validate_swauth_credentials(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "isemass.cli.swauth_ops.validate_swauth_credentials",
+        fake_validate_swauth_credentials,
+    )
     return calls
 
 
@@ -89,6 +123,7 @@ def _detailed_result(
 
 
 def _patch_coa_runner_with_results(monkeypatch, results: list[CoaResult]):
+    _patch_coa_preflight(monkeypatch)
     calls = []
 
     def fake_run_coa_requests(**kwargs):
@@ -99,6 +134,34 @@ def _patch_coa_runner_with_results(monkeypatch, results: list[CoaResult]):
     return calls
 
 
+class FakeProgress:
+    instances = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.tasks = []
+        self.advances = []
+        FakeProgress.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+    def add_task(self, description, *, total):
+        self.tasks.append({"description": description, "total": total})
+        return len(self.tasks)
+
+    def advance(self, task) -> None:
+        self.advances.append(task)
+
+
+def _patch_progress(monkeypatch) -> type[FakeProgress]:
+    FakeProgress.instances = []
+    monkeypatch.setattr("isemass.cli.Progress", FakeProgress)
+    return FakeProgress
+
+
 def test_root_help_shows_commands() -> None:
     result = CliRunner().invoke(cli, ["--help"])
 
@@ -106,6 +169,13 @@ def test_root_help_shows_commands() -> None:
     assert "init" in result.output
     assert "coa" in result.output
     assert "swauth" in result.output
+
+
+def test_root_version_uses_project_metadata() -> None:
+    result = CliRunner().invoke(cli, ["--version"])
+
+    assert result.exit_code == 0
+    assert "isemass, version 0.4.0.dev0" in result.output
 
 
 def test_coa_help_shows_requested_options() -> None:
@@ -242,6 +312,8 @@ max_workers = 5
     )
 
     assert result.exit_code == 0
+    assert "Validating switch SSH credentials" in result.output
+    assert "10.1.1.1" in result.output
     assert calls == [
         {
             "switch_macs": {"10.1.1.1": ["aa:bb:cc:dd:ee:ff"]},
@@ -377,6 +449,76 @@ def test_swauth_prints_csv_warnings_but_processes_valid_rows(
     assert "Warning: CSV row 4" in result.output
 
 
+def test_swauth_preflight_failure_aborts_before_worker_submission(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _patch_swauth_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "switches.csv"
+    _write_swauth_csv(input_file, [("10.1.1.1", "00:11:22:33:44:55")])
+
+    def fail_preflight(**kwargs):
+        raise SwauthCredentialValidationError(
+            switch_address=kwargs["switch_address"],
+            error=RuntimeError("authentication failed"),
+        )
+
+    monkeypatch.setattr(
+        "isemass.cli.swauth_ops.validate_swauth_credentials",
+        fail_preflight,
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "swauth",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+        ],
+        input="switch-password\n",
+    )
+
+    assert result.exit_code != 0
+    assert calls == []
+    assert "Please validate user/pass combination is correct" in result.output
+    assert "Validate the first switch hostname/ip in the input CSV is valid" in result.output
+    assert "switch-password" not in result.output
+
+
+def test_swauth_progress_advances_once_per_switch(monkeypatch, tmp_path: Path) -> None:
+    progress = _patch_progress(monkeypatch)
+    _patch_swauth_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "switches.csv"
+    _write_swauth_csv(
+        input_file,
+        [
+            ("10.1.1.1", "00:11:22:33:44:55"),
+            ("10.1.1.2", "aa:bb:cc:dd:ee:ff"),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "swauth",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+        ],
+        input="switch-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert progress.instances[0].tasks == [
+        {"description": "Processing switch workers...", "total": 2}
+    ]
+    assert len(progress.instances[0].advances) == 2
+
+
 def test_coa_cli_options_override_settings(monkeypatch, tmp_path: Path) -> None:
     calls = _patch_coa_runner(monkeypatch)
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
@@ -419,6 +561,8 @@ insecure = false
     )
 
     assert result.exit_code == 0
+    assert "Validating CoA API credentials" in result.output
+    assert "02:00:00:00:00:00" in result.output
     assert calls == [
         {
             "macs": ["AA:BB:CC:DD:EE:FF"],
@@ -604,6 +748,80 @@ node = "ise-psn01"
     assert "API password for prompt-user:" in result.output
     assert calls[0]["username"] == "prompt-user"
     assert calls[0]["password"] == "prompt-pass"
+
+
+def test_coa_preflight_failure_aborts_before_api_submission(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_coa_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("00:11:22:33:44:55\n", encoding="utf-8")
+    failed_result = CoaResult(
+        mac="02:00:00:00:00:00",
+        success=False,
+        seconds=0.12,
+        result_message="Invalid API credentials",
+    )
+
+    def fail_preflight(**kwargs):
+        raise CoaCredentialValidationError(
+            host=kwargs["host"],
+            node=kwargs["node"],
+            result=failed_result,
+        )
+
+    monkeypatch.setattr("isemass.cli.coa_ops.validate_coa_credentials", fail_preflight)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+            "--yes",
+        ],
+        input="api-password\n",
+    )
+
+    assert result.exit_code != 0
+    assert calls == []
+    assert "Please validate user/pass combination is correct" in result.output
+    assert "Invalid API credentials" in result.output
+    assert "api-password" not in result.output
+
+
+def test_coa_progress_advances_once_per_mac(monkeypatch, tmp_path: Path) -> None:
+    progress = _patch_progress(monkeypatch)
+    _patch_coa_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "macs.txt"
+    input_file.write_text("00:11:22:33:44:55\naa:bb:cc:dd:ee:ff\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "coa",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+            "--host",
+            "ise-mnt.example.com",
+            "--node",
+            "ise-psn01",
+            "--yes",
+        ],
+        input="api-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert progress.instances[0].tasks == [{"description": "Performing CoA requests...", "total": 2}]
+    assert len(progress.instances[0].advances) == 2
 
 
 def test_coa_cli_output_file_overrides_settings_output_file(monkeypatch, tmp_path: Path) -> None:
