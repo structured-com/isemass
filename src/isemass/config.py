@@ -14,7 +14,9 @@ from isemass.defaults import DEFAULT_SETTINGS
 
 APP_NAME = "isemass"
 SETTINGS_FILENAME = "settings.toml"
+SSH_CONFIG_FILENAME = "ssh_config"
 TEMPLATE_PACKAGE = "isemass.templates"
+TEMPLATE_FILENAMES = (SETTINGS_FILENAME, SSH_CONFIG_FILENAME)
 
 
 class SettingsError(Exception):
@@ -29,6 +31,11 @@ def get_config_dir() -> Path:
 def get_settings_path() -> Path:
     """Return the platform-specific settings.toml path."""
     return get_config_dir() / SETTINGS_FILENAME
+
+
+def get_ssh_config_path() -> Path:
+    """Return the platform-specific ssh_config path."""
+    return get_config_dir() / SSH_CONFIG_FILENAME
 
 
 def default_settings() -> dict[str, dict[str, Any]]:
@@ -63,7 +70,12 @@ def load_settings() -> dict[str, dict[str, Any]]:
 
 def load_settings_template() -> str:
     """Return the packaged default settings.toml template."""
-    return files(TEMPLATE_PACKAGE).joinpath(SETTINGS_FILENAME).read_text(encoding="utf-8")
+    return _load_template(SETTINGS_FILENAME)
+
+
+def load_ssh_config_template() -> str:
+    """Return the packaged default ssh_config template."""
+    return _load_template(SSH_CONFIG_FILENAME)
 
 
 def write_default_settings(*, force: bool = False) -> tuple[Path, bool]:
@@ -72,10 +84,30 @@ def write_default_settings(*, force: bool = False) -> tuple[Path, bool]:
     Returns the settings path and a boolean indicating whether a file was written.
     """
     path = get_settings_path()
+    return _write_template(path=path, filename=SETTINGS_FILENAME, force=force)
+
+
+def write_default_config_files(*, force: bool = False) -> list[tuple[Path, bool]]:
+    """Write generated config files.
+
+    Returns a list of path/write-status tuples. Existing files are left untouched
+    unless force is true.
+    """
+    return [
+        _write_template(path=get_config_dir() / filename, filename=filename, force=force)
+        for filename in TEMPLATE_FILENAMES
+    ]
+
+
+def _write_template(*, path: Path, filename: str, force: bool) -> tuple[Path, bool]:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.exists() and not force:
         return path, False
 
-    path.write_text(load_settings_template(), encoding="utf-8")
+    path.write_text(_load_template(filename), encoding="utf-8")
     return path, True
+
+
+def _load_template(filename: str) -> str:
+    return files(TEMPLATE_PACKAGE).joinpath(filename).read_text(encoding="utf-8")

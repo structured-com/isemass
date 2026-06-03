@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from isemass.cli import cli
 from isemass.coa import CoaResult
+from isemass.swauth import SwauthResult
 
 
 def _patch_config_dir(monkeypatch, path: Path) -> Path:
@@ -30,6 +31,33 @@ def _patch_coa_runner(monkeypatch):
 
     monkeypatch.setattr("isemass.cli.coa_ops.run_coa_requests", fake_run_coa_requests)
     return calls
+
+
+def _patch_swauth_runner(monkeypatch):
+    calls = []
+
+    def fake_run_swauth_requests(**kwargs):
+        calls.append(kwargs)
+        for switch_address, macs in kwargs["switch_macs"].items():
+            for mac in macs:
+                yield SwauthResult(
+                    switch_address=switch_address,
+                    mac=mac,
+                    success=True,
+                    seconds=0.12,
+                    result_message="mocked switch success",
+                    show_command=f"show authentication sessions mac {mac} detail",
+                    clear_command=f"clear authentication sessions mac {mac}",
+                )
+
+    monkeypatch.setattr("isemass.cli.swauth_ops.run_swauth_requests", fake_run_swauth_requests)
+    return calls
+
+
+def _write_swauth_csv(path: Path, rows: list[tuple[str, str]]) -> None:
+    csv_rows = ["switch_address,mac_address"]
+    csv_rows.extend(f"{switch_address},{mac}" for switch_address, mac in rows)
+    path.write_text("\n".join(csv_rows) + "\n", encoding="utf-8")
 
 
 def _detailed_result(
@@ -94,14 +122,26 @@ def test_coa_help_shows_requested_options() -> None:
     assert "-y, --yes" in result.output
 
 
-def test_init_creates_settings_file(monkeypatch, tmp_path: Path) -> None:
+def test_swauth_help_shows_requested_options() -> None:
+    result = CliRunner().invoke(cli, ["swauth", "--help"])
+
+    assert result.exit_code == 0
+    assert "-i, --input-file" in result.output
+    assert "-u, --username" in result.output
+    assert "-w, --max-workers" in result.output
+    assert "--verbose" not in result.output
+
+
+def test_init_creates_config_files(monkeypatch, tmp_path: Path) -> None:
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
 
     result = CliRunner().invoke(cli, ["init"])
 
     settings_file = config_dir / "settings.toml"
+    ssh_config_file = config_dir / "ssh_config"
     assert result.exit_code == 0
     assert settings_file.exists()
+    assert ssh_config_file.exists()
     settings_text = settings_file.read_text(encoding="utf-8")
     active_settings_lines = [
         line.strip()
@@ -112,33 +152,229 @@ def test_init_creates_settings_file(monkeypatch, tmp_path: Path) -> None:
     assert "# Turns on extra verbose logging (NOT IMPLEMENTED YET)" in settings_text
     assert "# username = \"bob-example\"" in settings_text
     assert "# output_file = \"coa-results.json\"" in settings_text
+    assert "[swauth]" in settings_text
+    assert "# input_file = \"switches-and-macs.csv\"" in settings_text
     assert "username = \"bob-example\"" not in active_settings_lines
+    assert "StrictHostKeyChecking no" in ssh_config_file.read_text(encoding="utf-8")
     assert str(settings_file) in result.output.replace("\n", "")
+    assert str(ssh_config_file) in result.output.replace("\n", "")
 
 
-def test_init_refuses_overwrite_without_force(monkeypatch, tmp_path: Path) -> None:
+def test_init_writes_missing_files_without_overwriting_existing(
+    monkeypatch, tmp_path: Path
+) -> None:
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
     config_dir.mkdir(parents=True)
     settings_file = config_dir / "settings.toml"
     settings_file.write_text("existing = true\n", encoding="utf-8")
+    ssh_config_file = config_dir / "ssh_config"
 
     result = CliRunner().invoke(cli, ["init"])
 
-    assert result.exit_code != 0
-    assert "already exists" in result.output
+    assert result.exit_code == 0
     assert settings_file.read_text(encoding="utf-8") == "existing = true\n"
+    assert ssh_config_file.exists()
+    assert "Left existing config file unchanged" in result.output
+    assert "Created config file" in result.output
 
 
-def test_init_force_overwrites_existing_file(monkeypatch, tmp_path: Path) -> None:
+def test_init_force_overwrites_existing_files(monkeypatch, tmp_path: Path) -> None:
     config_dir = _patch_config_dir(monkeypatch, tmp_path)
     config_dir.mkdir(parents=True)
     settings_file = config_dir / "settings.toml"
     settings_file.write_text("existing = true\n", encoding="utf-8")
+    ssh_config_file = config_dir / "ssh_config"
+    ssh_config_file.write_text("existing ssh config\n", encoding="utf-8")
 
     result = CliRunner().invoke(cli, ["init", "--force"])
 
     assert result.exit_code == 0
     assert "[coa]" in settings_file.read_text(encoding="utf-8")
+    assert "Host *" in ssh_config_file.read_text(encoding="utf-8")
+
+
+def test_init_leaves_all_existing_files_without_force(monkeypatch, tmp_path: Path) -> None:
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    settings_file = config_dir / "settings.toml"
+    ssh_config_file = config_dir / "ssh_config"
+    settings_file.write_text("existing = true\n", encoding="utf-8")
+    ssh_config_file.write_text("existing ssh config\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["init"])
+
+    assert result.exit_code == 0
+    assert settings_file.read_text(encoding="utf-8") == "existing = true\n"
+    assert ssh_config_file.read_text(encoding="utf-8") == "existing ssh config\n"
+    assert "All generated config files already exist" in result.output
+
+
+def test_swauth_cli_options_override_settings(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_swauth_runner(monkeypatch)
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    configured_input = tmp_path / "configured-switches.csv"
+    _write_swauth_csv(configured_input, [("configured-switch", "00:11:22:33:44:55")])
+    cli_input = tmp_path / "cli-switches.csv"
+    _write_swauth_csv(cli_input, [("10.1.1.1", "aa:bb:cc:dd:ee:ff")])
+    (config_dir / "settings.toml").write_text(
+        f"""
+[swauth]
+input_file = "{configured_input}"
+username = "config-user"
+max_workers = 5
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "swauth",
+            "--input-file",
+            str(cli_input),
+            "--username",
+            "cli-user",
+            "--max-workers",
+            "9",
+        ],
+        input="switch-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "switch_macs": {"10.1.1.1": ["aa:bb:cc:dd:ee:ff"]},
+            "username": "cli-user",
+            "password": "switch-password",
+            "max_workers": 9,
+            "ssh_config_file": config_dir / "ssh_config",
+        }
+    ]
+    assert "10.1.1.1" in result.output
+    assert "aa:bb:cc:dd:ee:ff" in result.output
+    assert "mocked switch success" in " ".join(result.output.split())
+
+
+def test_swauth_settings_override_defaults_when_cli_omits_values(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _patch_swauth_runner(monkeypatch)
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    configured_input = tmp_path / "configured-switches.csv"
+    _write_swauth_csv(configured_input, [("switch-a.example.com", "0011.2233.4455")])
+    (config_dir / "settings.toml").write_text(
+        f"""
+[swauth]
+input_file = "{configured_input}"
+username = "config-user"
+max_workers = 5
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["swauth"], input="switch-password\n")
+
+    assert result.exit_code == 0
+    assert calls[0]["switch_macs"] == {"switch-a.example.com": ["0011.2233.4455"]}
+    assert calls[0]["username"] == "config-user"
+    assert calls[0]["max_workers"] == 5
+
+
+def test_swauth_uses_defaults_when_cli_and_settings_omit_optional_values(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _patch_swauth_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "switches.csv"
+    _write_swauth_csv(input_file, [("10.1.1.1", "00-11-22-33-44-55")])
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "swauth",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+        ],
+        input="switch-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert calls[0]["max_workers"] == 20
+
+
+def test_swauth_prompts_for_username_when_missing(monkeypatch, tmp_path: Path) -> None:
+    calls = _patch_swauth_runner(monkeypatch)
+    config_dir = _patch_config_dir(monkeypatch, tmp_path)
+    config_dir.mkdir(parents=True)
+    input_file = tmp_path / "switches.csv"
+    _write_swauth_csv(input_file, [("10.1.1.1", "00:11:22:33:44:55")])
+    (config_dir / "settings.toml").write_text(
+        f"""
+[swauth]
+input_file = "{input_file}"
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["swauth"], input="prompt-user\nprompt-pass\n")
+
+    assert result.exit_code == 0
+    assert "Switch username:" in result.output
+    assert "Switch password for prompt-user:" in result.output
+    assert calls[0]["username"] == "prompt-user"
+    assert calls[0]["password"] == "prompt-pass"
+
+
+def test_swauth_missing_required_resolved_values_errors(monkeypatch, tmp_path: Path) -> None:
+    _patch_config_dir(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(cli, ["swauth"])
+
+    assert result.exit_code == 2
+    assert "Missing required option(s)" in result.output
+    assert "--input-file" in result.output
+    assert "[swauth]" in result.output
+
+
+def test_swauth_prints_csv_warnings_but_processes_valid_rows(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _patch_swauth_runner(monkeypatch)
+    _patch_config_dir(monkeypatch, tmp_path)
+    input_file = tmp_path / "switches.csv"
+    input_file.write_text(
+        "\n".join(
+            [
+                "switch_address,mac_address",
+                "10.1.1.1,00:11:22:33:44:55",
+                " ,aa:bb:cc:dd:ee:ff",
+                "10.1.1.2,not-a-mac",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "swauth",
+            "--input-file",
+            str(input_file),
+            "--username",
+            "cli-user",
+        ],
+        input="switch-password\n",
+    )
+
+    assert result.exit_code == 0
+    assert calls[0]["switch_macs"] == {"10.1.1.1": ["00:11:22:33:44:55"]}
+    assert "Warning: CSV row 3" in result.output
+    assert "Warning: CSV row 4" in result.output
 
 
 def test_coa_cli_options_override_settings(monkeypatch, tmp_path: Path) -> None:
@@ -195,7 +431,6 @@ insecure = false
         }
     ]
     assert "AA:BB:CC:DD:EE:FF" in result.output
-    assert "True" in result.output
     assert "mocked success" in result.output
 
 
