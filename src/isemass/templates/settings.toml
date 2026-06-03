@@ -30,6 +30,19 @@ max_workers = 20
 # Skip HTTPS certificate validation when set.
 insecure = false
 
+############################################################
+# Switch reauthentication through switch SSH
+############################################################
 [swauth]
+
 # Turns on extra verbose logging (NOT IMPLEMENTED YET)
 verbose = false
+
+# Username for Cisco switches. Prompts during runtime if omitted.
+# username = "bob-example"
+
+# Input CSV file containing switch_address and mac_address columns.
+# input_file = "switches-and-macs.csv"
+
+# Maximum number of concurrent switch SSH workers.
+max_workers = 20

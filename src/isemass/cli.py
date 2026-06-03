@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+import tomllib
 from typing import Any
 
 import click
-from rich.table import Table
 from rich.panel import Panel
+from rich.progress import Progress
+from rich.table import Table
 
-from isemass import __version__
 from isemass import coa as coa_ops
-from isemass.config import SettingsError, get_settings_path, load_settings, write_default_settings
+from isemass import swauth as swauth_ops
+from isemass.config import (
+    SettingsError,
+    get_ssh_config_path,
+    load_settings,
+    write_default_config_files,
+)
 from isemass.console import console
 
 
@@ -73,8 +81,27 @@ def _coerce_bool(value: Any, *, field_name: str) -> bool:
     raise click.ClickException(f"{field_name} must be a boolean true or false.")
 
 
+def _package_version() -> str:
+    try:
+        return version("isemass")
+    except PackageNotFoundError:
+        return _version_from_pyproject()
+
+
+def _version_from_pyproject() -> str:
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    try:
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        project = pyproject.get("project", {})
+        project_version = project.get("version")
+    except (OSError, tomllib.TOMLDecodeError):
+        return "unknown"
+
+    return str(project_version or "unknown")
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option(version=__version__, prog_name="isemass")
+@click.version_option(version=_package_version(), prog_name="isemass")
 def cli() -> None:
     """Mass Cisco ISE related operations."""
 
@@ -83,16 +110,23 @@ def cli() -> None:
 @click.option(
     "--force",
     is_flag=True,
-    help="Overwrite an existing settings.toml file.",
+    help="Overwrite existing generated config files.",
 )
 def init(force: bool) -> None:
-    """Create the optional settings.toml file."""
-    path, wrote_file = write_default_settings(force=force)
+    """Create optional generated config files."""
+    results = write_default_config_files(force=force)
 
-    if not wrote_file:
-        raise click.ClickException(f"Settings file already exists: {path}. Use --force to overwrite.")
+    wrote_any = False
+    for path, wrote_file in results:
+        if wrote_file:
+            wrote_any = True
+            action = "Wrote" if force else "Created"
+            console.print(f"[green]{action} config file:[/green] '{path}'")
+        else:
+            console.print(f"[yellow]Left existing config file unchanged:[/yellow] '{path}'")
 
-    console.print(f"[green]Created settings file:[/green] '{path}'")
+    if not wrote_any:
+        console.print("[yellow]All generated config files already exist. Use --force to overwrite.[/yellow]")
 
 
 @cli.command()
@@ -199,22 +233,46 @@ def coa(
     _print_mac_preview(macs)
     if not yes and not click.confirm("Continue with CoA operation?", default=False):
         raise click.ClickException("Operation not approved. Aborting.")
-    
+
+    console.print()
+    console.print(
+        (
+            "[cyan]Validating CoA API credentials[/cyan] "
+            f"against host '{resolved_host}', node '{resolved_node}', "
+            f"test MAC {coa_ops.PREFLIGHT_MAC}..."
+        ),
+        highlight=False,
+    )
+    try:
+        coa_ops.validate_coa_credentials(
+            host=resolved_host,
+            node=resolved_node,
+            username=str(resolved_username),
+            password=password,
+            insecure=resolved_insecure,
+        )
+    except coa_ops.CoaCredentialValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print("[green]CoA credential preflight passed.[/green]")
+
     console.print()
     console.print(Panel.fit(f"Starting CoA requests for {len(macs)} MAC address(es)..."))
 
     results: list[coa_ops.CoaResult] = []
-    for result in coa_ops.run_coa_requests(
-        macs=macs,
-        host=resolved_host,
-        node=resolved_node,
-        username=str(resolved_username),
-        password=password,
-        max_workers=resolved_max_workers,
-        insecure=resolved_insecure,
-    ):
-        results.append(result)
-        _print_coa_result(result)
+    with Progress(console=console) as progress:
+        task = progress.add_task("Performing CoA requests...", total=len(macs))
+        for result in coa_ops.run_coa_requests(
+            macs=macs,
+            host=resolved_host,
+            node=resolved_node,
+            username=str(resolved_username),
+            password=password,
+            max_workers=resolved_max_workers,
+            insecure=resolved_insecure,
+        ):
+            results.append(result)
+            _print_coa_result(result)
+            progress.advance(task)
     console.print()
 
     if resolved_output_file is not None:
@@ -228,15 +286,112 @@ def coa(
 
 
 @cli.command()
-def swauth() -> None:
+@click.option(
+    "-i",
+    "--input-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Input CSV file that has columns/data of switch_address and mac_address.",
+)
+@click.option(
+    "-u",
+    "--username",
+    help="Username for Cisco switches. Prompts during runtime if omitted.",
+)
+@click.option(
+    "-w",
+    "--max-workers",
+    type=int,
+    help="Maximum number of concurrent switch SSH workers.",
+)
+def swauth(
+    input_file: Path | None,
+    username: str | None,
+    max_workers: int | None,
+) -> None:
     """Mass session reauthentication through switch SSH."""
+    console.print()
     settings = _load_settings_for_cli()
     swauth_settings = _section(settings, "swauth")
-    verbose = _coerce_bool(swauth_settings.get("verbose", False), field_name="verbose")
+    _coerce_bool(swauth_settings.get("verbose", False), field_name="verbose")
 
-    console.print("[yellow]Switch reauthentication is not implemented yet.[/yellow]")
-    console.print(f"Verbose: {verbose}")
-    console.print(f"Settings path: {get_settings_path()}")
+    required_values = {
+        "--input-file": _resolve_option(input_file, swauth_settings.get("input_file")),
+    }
+    missing = _missing_required_options(required_values)
+    if missing:
+        missing_options = ", ".join(missing)
+        raise click.UsageError(
+            f"Missing required option(s): {missing_options}. "
+            "Provide them on the CLI or in [swauth]."
+        )
+
+    resolved_input_file = _coerce_input_file(required_values["--input-file"])
+    resolved_username = _resolve_option(username, swauth_settings.get("username"))
+    if not resolved_username:
+        resolved_username = click.prompt("Switch username", type=str)
+
+    resolved_max_workers = _coerce_positive_int(
+        _resolve_option(max_workers, swauth_settings.get("max_workers")),
+        field_name="max_workers",
+    )
+
+    password = click.prompt(f"Switch password for {resolved_username}", hide_input=True, type=str)
+    console.print()
+
+    try:
+        input_data = swauth_ops.load_switch_mac_groups(resolved_input_file)
+    except swauth_ops.SwauthCsvError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _print_swauth_warnings(input_data.warnings)
+    ssh_config_file = get_ssh_config_path()
+    first_switch = swauth_ops.first_switch_address(input_data.switch_macs)
+
+    console.print()
+    console.print(
+        (
+            "[cyan]Validating switch SSH credentials[/cyan] "
+            f"against first cleaned switch '{first_switch}'..."
+        ),
+        highlight=False,
+    )
+    try:
+        swauth_ops.validate_swauth_credentials(
+            switch_address=first_switch,
+            username=str(resolved_username),
+            password=password,
+            ssh_config_file=ssh_config_file,
+        )
+    except swauth_ops.SwauthCredentialValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print("[green]Switch credential preflight passed.[/green]")
+
+    console.print()
+    console.print(
+        Panel.fit(
+            (
+                f"Starting switch reauthentication for {input_data.mac_count} MAC address(es) "
+                f"across {input_data.switch_count} switch(es)..."
+            )
+        )
+    )
+
+    with Progress(console=console) as progress:
+        task = progress.add_task("Processing switch workers...", total=input_data.switch_count)
+
+        def advance_switch_progress(_switch_address: str) -> None:
+            progress.advance(task)
+
+        for result in swauth_ops.run_swauth_requests(
+            switch_macs=input_data.switch_macs,
+            username=str(resolved_username),
+            password=password,
+            max_workers=resolved_max_workers,
+            ssh_config_file=ssh_config_file,
+            on_switch_complete=advance_switch_progress,
+        ):
+            _print_swauth_result(result)
+    console.print()
 
 
 def _print_mac_preview(macs: list[str]) -> None:
@@ -287,6 +442,29 @@ def _print_coa_result(result: coa_ops.CoaResult) -> None:
             f"[green]{result.mac:<17}[/green] | "
             f"[blue]{result.seconds:>6.2f}s[/blue] | "
             f"{success_icon:^3} | "
+            f"{result.result_message}"
+        ),
+        highlight=False,
+    )
+
+
+def _print_swauth_warnings(warnings: list[swauth_ops.SwauthInputWarning]) -> None:
+    for warning in warnings:
+        console.print(
+            f"[yellow]Warning:[/yellow] CSV row {warning.row_number}: {warning.message}",
+            highlight=False,
+        )
+
+
+def _print_swauth_result(result: swauth_ops.SwauthResult) -> None:
+    status = "OK" if result.success else "FAIL"
+
+    console.print(
+        (
+            f"[cyan]{result.switch_address:<20}[/cyan] | "
+            f"[green]{result.mac:<17}[/green] | "
+            f"[blue]{result.seconds:>6.2f}s[/blue] | "
+            f"{status:^5} | "
             f"{result.result_message}"
         ),
         highlight=False,

@@ -12,5 +12,6 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
     },
     "swauth": {
         "verbose": False,
+        "max_workers": 20,
     },
 }

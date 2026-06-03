@@ -4,7 +4,7 @@
 
 Current routines include:
 - **coa**: Perform CoA (Change-of-Authority) for multiple MAC addresses from an input text file, using Cisco ISE Monitoring Open API
-- **swauth**: Reauthenticate ISE sessions from NAD's directly (NOT IMPLEMENTED YET)
+- **swauth**: Reauthenticate ISE sessions from NAD's directly over switch SSH
 
 
 ## Requirements
@@ -23,11 +23,16 @@ Then install the tool simply with:
 uv tool install isemass
 ```
 
-Next, optionally, you can initialize the `settings.toml` file which can be used to set configuration for the tool:
+Next, optionally, you can initialize generated config files:
 ```
 isemass init
 ```
-(This is optional, as the tool will run with all CLI arguments, if you prefer)
+This creates:
+- `settings.toml`, which can be used to set configuration for the tool.
+- `ssh_config`, which `swauth` passes to Netmiko for Cisco switch SSH compatibility.
+
+This is optional for `coa`, as the tool will run with all CLI arguments. For `swauth`, running
+`isemass init` is recommended so the Cisco SSH `ssh_config` file is available (needed for older switches).
 
 
 ## Configuration Order
@@ -59,4 +64,24 @@ Also: to perform operations using the Monitoring APIs, the users must be assigne
 - System Admin
 - MnT Admin
 
+
+## How to Use (swauth)
+
+First, you can see help for all options:
+```
+isemass swauth --help
+```
+
+Here is a typical example of using the switch reauthentication routine:
+```
+isemass swauth --input-file switches-and-macs.csv --username switch-admin
+```
+
+The input CSV must include these columns:
+- `switch_address`: Switch IP address, hostname, or FQDN.
+- `mac_address`: One MAC address in colon, dash, or Cisco dotted format.
+
+Repeated `switch_address` values are expected. `swauth` groups MAC addresses by switch, opens one
+SSH session per switch worker, checks each MAC with `show authentication sessions mac ... detail`,
+and clears found sessions with `clear authentication sessions mac ...`.
 

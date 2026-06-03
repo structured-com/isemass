@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "isemass"
-version = "0.3.0"
+version = "0.4.0"
 description = "Mass-change operations (like CoA) for Cisco ISE or ISE-related NAD's"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,6 +15,8 @@ classifiers = [
 license = "Apache-2.0"
 dependencies = [
     "click>=8.1",
+    "netmiko>=4.4",
+    "pandas>=2.2",
     "platformdirs>=4.2",
     "requests>=2.32",
     "rich>=13.7",

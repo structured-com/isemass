@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import requests
+import pytest
 import urllib3
 
 from isemass.coa import (
     HEADERS,
+    MAC_NOT_VALID_SESSION_RESULT,
+    MAC_NOT_VALID_SESSION_TEXT,
+    PREFLIGHT_MAC,
     REQUEST_TIMEOUT_SECONDS,
+    CoaCredentialValidationError,
     CoaResult,
     build_coa_url,
     extract_macs,
     perform_coa_request,
     results_to_json_data,
     run_coa_requests,
+    validate_coa_credentials,
 )
 
 
@@ -93,6 +99,83 @@ def test_perform_coa_request_constructs_request_and_returns_success() -> None:
     assert result.ise_result_value == "true"
     assert result.error_type is None
     assert result.error_message is None
+
+
+def test_validate_coa_credentials_uses_placeholder_mac_and_accepts_invalid_session() -> None:
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse(
+            status_code=400,
+            text=(
+                f"{MAC_NOT_VALID_SESSION_TEXT} {PREFLIGHT_MAC}. "
+                "This CoA request can not be delivered."
+            ),
+        )
+
+    result = validate_coa_credentials(
+        host="ise-mnt.example.com",
+        node="ise-psn01",
+        username="api-user",
+        password="api-password",
+        insecure=True,
+        request_func=fake_get,
+    )
+
+    assert result.mac == PREFLIGHT_MAC
+    assert result.result_message == MAC_NOT_VALID_SESSION_RESULT
+    assert captured == {
+        "url": build_coa_url(
+            host="ise-mnt.example.com",
+            node="ise-psn01",
+            mac=PREFLIGHT_MAC,
+        ),
+        "headers": HEADERS,
+        "verify": False,
+        "auth": ("api-user", "api-password"),
+        "timeout": REQUEST_TIMEOUT_SECONDS,
+    }
+
+
+def test_validate_coa_credentials_rejects_invalid_credentials_without_password() -> None:
+    def fake_get(*args, **kwargs):
+        return FakeResponse(status_code=401, text="Unauthorized")
+
+    with pytest.raises(CoaCredentialValidationError) as exc_info:
+        validate_coa_credentials(
+            host="ise-mnt.example.com",
+            node="ise-psn01",
+            username="api-user",
+            password="api-password",
+            insecure=False,
+            request_func=fake_get,
+        )
+
+    message = str(exc_info.value)
+    assert "Invalid API credentials" in message
+    assert "Please validate user/pass combination is correct" in message
+    assert "ise-mnt.example.com" in message
+    assert "ise-psn01" in message
+    assert "api-password" not in message
+
+
+def test_validate_coa_credentials_rejects_undefined_failure() -> None:
+    def fake_get(*args, **kwargs):
+        return FakeResponse(status_code=500, text="Server error")
+
+    with pytest.raises(CoaCredentialValidationError) as exc_info:
+        validate_coa_credentials(
+            host="ise-mnt.example.com",
+            node="ise-psn01",
+            username="api-user",
+            password="api-password",
+            insecure=False,
+            request_func=fake_get,
+        )
+
+    assert exc_info.value.result.result_message == "Undefined failure"
 
 
 def test_perform_coa_request_classifies_false_result_as_coa_failed() -> None:

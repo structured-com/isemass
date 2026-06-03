@@ -20,6 +20,8 @@ HEADERS = {
 REQUEST_METHOD = "GET"
 REQUEST_TIMEOUT_SECONDS = 30
 MAC_NOT_VALID_SESSION_TEXT = "No NAS_IP_ADDRESS associated with the calling station id"
+MAC_NOT_VALID_SESSION_RESULT = "MAC address not a valid session"
+PREFLIGHT_MAC = "02:00:00:00:00:00"
 
 # REGEX for all formats of MAC address.
 # "?:" removes groups so re.findall returns complete MAC address strings.
@@ -68,6 +70,24 @@ class CoaResult:
 
 
 RequestFunc = Callable[..., Any]
+
+
+class CoaCredentialValidationError(Exception):
+    """Raised when the CoA credential preflight does not produce the expected response."""
+
+    def __init__(self, *, host: str, node: str, result: CoaResult) -> None:
+        self.host = host
+        self.node = node
+        self.result = result
+        super().__init__(
+            (
+                "CoA credential preflight failed "
+                f"for host '{host}', node '{node}', test MAC {PREFLIGHT_MAC}: "
+                f"{result.result_message}. "
+                "Please validate user/pass combination is correct. "
+                "Validate the ISE host/node values are valid."
+            )
+        )
 
 
 def normalize_mac(mac: str) -> str:
@@ -172,6 +192,35 @@ def perform_coa_request(
     )
 
 
+def validate_coa_credentials(
+    *,
+    host: str,
+    node: str,
+    username: str,
+    password: str,
+    insecure: bool,
+    request_func: RequestFunc = requests.get,
+) -> CoaResult:
+    """Validate CoA API credentials with a harmless placeholder MAC request."""
+    verify_tls = not insecure
+    if insecure:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    result = perform_coa_request(
+        mac=PREFLIGHT_MAC,
+        host=host,
+        node=node,
+        username=username,
+        password=password,
+        verify_tls=verify_tls,
+        request_func=request_func,
+    )
+    if result.result_message != MAC_NOT_VALID_SESSION_RESULT:
+        raise CoaCredentialValidationError(host=host, node=node, result=result)
+
+    return result
+
+
 def run_coa_requests(
     *,
     macs: Iterable[str],
@@ -274,7 +323,7 @@ def _classify_coa_response(
         return False, "Invalid API credentials"
 
     if response_text and MAC_NOT_VALID_SESSION_TEXT in response_text:
-        return False, "MAC address not a valid session"
+        return False, MAC_NOT_VALID_SESSION_RESULT
 
     if ise_result_value is not None:
         normalized_result = ise_result_value.casefold()
